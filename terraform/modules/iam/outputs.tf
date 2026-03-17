@@ -3,11 +3,6 @@ output "lambda_role_arn" {
   value       = aws_iam_role.ingestion_lambda.arn
 }
 
-output "ecs_role_arn" {
-  description = "ARN of the ECS ingestion IAM role"
-  value       = aws_iam_role.ingestion_ecs.arn
-}
-
 output "migration_role_arn" {
   description = "ARN of the migration IAM role"
   value       = aws_iam_role.migration.arn

@@ -23,17 +23,6 @@ variable "az_count" {
   type        = number
 }
 
-variable "enable_nat_gateway" {
-  description = "Whether to enable NAT Gateway"
-  type        = bool
-}
-
-variable "single_nat_gateway" {
-  description = "Use a single NAT Gateway instead of one per AZ"
-  type        = bool
-  default     = false
-}
-
 variable "aurora_instance_class" {
   description = "Aurora instance class"
   type        = string
@@ -95,8 +84,3 @@ variable "cost_center" {
   type        = string
 }
 
-variable "ingestion_runtime" {
-  description = "Primary ingestion runtime (lambda or ecs)"
-  type        = string
-  default     = "lambda"
-}

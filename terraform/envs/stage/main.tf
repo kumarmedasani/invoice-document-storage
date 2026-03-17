@@ -18,13 +18,11 @@ locals {
 module "networking" {
   source = "../../modules/networking"
 
-  env                = var.env
-  vpc_cidr           = var.vpc_cidr
-  az_count           = var.az_count
-  enable_nat_gateway = var.enable_nat_gateway
-  single_nat_gateway = var.single_nat_gateway
-  aws_region         = var.aws_region
-  tags               = local.common_tags
+  env        = var.env
+  vpc_cidr   = var.vpc_cidr
+  az_count   = var.az_count
+  aws_region = var.aws_region
+  tags       = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -92,6 +90,20 @@ module "s3_documents" {
 }
 
 # -----------------------------------------------------------------------------
+# Transfer Family SFTP (depends on: s3, kms, monitoring)
+# Vendors drop invoice files via SFTP → lands in S3 → triggers ingestion
+# -----------------------------------------------------------------------------
+module "transfer_family" {
+  source = "../../modules/transfer_family"
+
+  env           = var.env
+  s3_bucket_arn = module.s3_documents.bucket_arn
+  kms_key_arn   = module.kms.key_arn
+  log_group_arn = module.monitoring.log_group_application_arn
+  tags          = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
 # IAM (depends on: s3, kms, aurora — no circular deps now)
 # -----------------------------------------------------------------------------
 module "iam" {
@@ -103,6 +115,5 @@ module "iam" {
   s3_bucket_arn     = module.s3_documents.bucket_arn
   kms_key_arn       = module.kms.key_arn
   master_secret_arn = module.aurora_postgres.master_secret_arn
-  ingestion_runtime = var.ingestion_runtime
   tags              = local.common_tags
 }

@@ -8,6 +8,11 @@ output "log_group_application" {
   value       = aws_cloudwatch_log_group.application.name
 }
 
+output "log_group_application_arn" {
+  description = "CloudWatch log group ARN for the application"
+  value       = aws_cloudwatch_log_group.application.arn
+}
+
 output "log_group_aurora" {
   description = "CloudWatch log group name for Aurora"
   value       = aws_cloudwatch_log_group.aurora.name

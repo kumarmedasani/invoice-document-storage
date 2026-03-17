@@ -43,12 +43,12 @@ output "lambda_role_arn" {
   value       = module.iam.lambda_role_arn
 }
 
-output "ecs_role_arn" {
-  description = "ECS ingestion role ARN"
-  value       = module.iam.ecs_role_arn
-}
-
 output "dashboard_name" {
   description = "CloudWatch dashboard name"
   value       = module.monitoring.dashboard_name
+}
+
+output "sftp_server_endpoint" {
+  description = "Transfer Family SFTP server endpoint"
+  value       = module.transfer_family.sftp_server_endpoint
 }
