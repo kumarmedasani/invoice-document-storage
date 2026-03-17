@@ -361,6 +361,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "firehose_backup" 
   }
 }
 
+resource "aws_s3_bucket_versioning" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = aws_s3_bucket.firehose_backup[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "firehose_backup" {
   count  = local.enable_splunk ? 1 : 0
   bucket = aws_s3_bucket.firehose_backup[0].id

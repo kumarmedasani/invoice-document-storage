@@ -109,6 +109,8 @@ This section documents every component shown in the architecture diagram, why it
 | **VPC attachment** | Deployed in app subnets (private) to access Aurora via RDS Proxy and S3 via VPC Gateway Endpoint |
 | **IAM role** | `invoice-ingestion-lambda-{env}` — cross-bucket: `GetObject`+`DeleteObject` on landing bucket, `PutObject`+`GetObject` on documents bucket, plus KMS, Secrets Manager, and CloudWatch Logs. Also attached: `AWSLambdaVPCAccessExecutionRole` for ENI management |
 | **SNS trigger** | Subscribed to `invoice-file-notifications-{env}` topic with `lambda:InvokeFunction` permission |
+| **Dead letter queue** | SQS queue `invoice-ingestion-dlq-{env}` — captures failed invocations for inspection and reprocessing (14-day retention, KMS encrypted) |
+| **CloudWatch alarms** | 3 alarms: Lambda Errors > 0, Lambda Throttles > 0, DLQ messages visible > 0 — all alert via SNS |
 | **Terraform module** | `lambda_ingestion` — deploys with a stub handler; CI/CD pipeline replaces with real code |
 
 ### Document Storage
@@ -130,6 +132,7 @@ This section documents every component shown in the architecture diagram, why it
 |---|---|
 | **What it is** | Dedicated bucket that receives server access logs from the documents bucket |
 | **Why it's needed** | S3 server access logging provides an audit trail of every GET, PUT, DELETE, HEAD, and LIST operation on the documents bucket. This is required for compliance auditing, forensic investigation of unauthorized access, and tracking document retrieval patterns. A separate bucket prevents self-referencing logging loops |
+| **Encryption** | SSE-AES256 (S3-managed keys) |
 | **Retention** | 90-day lifecycle expiration |
 | **Prefix** | `s3-access-logs/` |
 

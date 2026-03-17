@@ -19,6 +19,7 @@ This document contains step-by-step operational procedures for the Invoice Docum
 - [13. Troubleshooting: SFTP Connectivity](#13-troubleshooting-sftp-connectivity)
 - [14. Troubleshooting: Landing Zone Processing](#14-troubleshooting-landing-zone-processing)
 - [15. Troubleshooting: Splunk Log Streaming](#15-troubleshooting-splunk-log-streaming)
+- [16. Monitoring Lambda Dead Letter Queue (DLQ)](#16-monitoring-lambda-dead-letter-queue-dlq)
 
 ## Common Setup: Retrieve Aurora Credentials
 
@@ -609,6 +610,16 @@ aws cloudwatch describe-alarms \
   --alarm-name-prefix "kms-" \
   --query 'MetricAlarms[*].{Name: AlarmName, State: StateValue}' \
   --output table
+
+aws cloudwatch describe-alarms \
+  --alarm-name-prefix "lambda-" \
+  --query 'MetricAlarms[*].{Name: AlarmName, State: StateValue}' \
+  --output table
+
+aws cloudwatch describe-alarms \
+  --alarm-name-prefix "dlq-" \
+  --query 'MetricAlarms[*].{Name: AlarmName, State: StateValue}' \
+  --output table
 ```
 
 ### Query Application Logs
@@ -889,3 +900,72 @@ Files here indicate Firehose could not deliver to Splunk HEC. Check HEC endpoint
 | 403 from Splunk HEC | Invalid or expired HEC token | Rotate token in Splunk, update `splunk_hec_token` tfvar |
 | Logs in wrong Splunk index | HEC token misconfigured | Verify token-to-index mapping in Splunk admin |
 | Partial log groups missing | Subscription filter limit (2 per log group) | Check if another subscription filter exists |
+
+---
+
+## 16. Monitoring Lambda Dead Letter Queue (DLQ)
+
+**When to use:** Lambda ingestion errors are occurring, or you want to inspect failed events for reprocessing.
+
+### Check DLQ Depth
+
+```bash
+aws sqs get-queue-attributes \
+  --queue-url "https://sqs.us-east-1.amazonaws.com/$(aws sts get-caller-identity --query Account --output text)/invoice-ingestion-dlq-$ENV" \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+  --query 'Attributes'
+```
+
+### Read Messages from DLQ (without deleting)
+
+```bash
+QUEUE_URL=$(aws sqs get-queue-url \
+  --queue-name "invoice-ingestion-dlq-$ENV" \
+  --query 'QueueUrl' --output text)
+
+aws sqs receive-message \
+  --queue-url "$QUEUE_URL" \
+  --max-number-of-messages 5 \
+  --visibility-timeout 0 \
+  --query 'Messages[*].Body' --output text | jq .
+```
+
+### Reprocess DLQ Messages
+
+After fixing the root cause, reprocess by re-publishing messages to the SNS topic:
+
+```bash
+QUEUE_URL=$(aws sqs get-queue-url \
+  --queue-name "invoice-ingestion-dlq-$ENV" \
+  --query 'QueueUrl' --output text)
+
+SNS_TOPIC_ARN=$(aws sns list-topics \
+  --query "Topics[?contains(TopicArn, 'invoice-file-notifications-$ENV')].TopicArn" \
+  --output text)
+
+while true; do
+  MSG=$(aws sqs receive-message --queue-url "$QUEUE_URL" --max-number-of-messages 1 --query 'Messages[0]' 2>/dev/null)
+  [[ "$MSG" == "null" || -z "$MSG" ]] && break
+
+  RECEIPT=$(echo "$MSG" | jq -r '.ReceiptHandle')
+  BODY=$(echo "$MSG" | jq -r '.Body')
+
+  echo "Re-publishing message to SNS..."
+  aws sns publish --topic-arn "$SNS_TOPIC_ARN" --message "$BODY"
+
+  aws sqs delete-message --queue-url "$QUEUE_URL" --receipt-handle "$RECEIPT"
+done
+echo "DLQ drained."
+```
+
+### CloudWatch Alarms
+
+Three alarms monitor Lambda health:
+
+| Alarm | Metric | Threshold | Action |
+|---|---|---|---|
+| `lambda-errors-{env}` | Lambda Errors | > 0 in 5 min | SNS alert |
+| `lambda-throttles-{env}` | Lambda Throttles | > 0 in 5 min | SNS alert |
+| `dlq-messages-{env}` | SQS ApproximateNumberOfMessagesVisible | > 0 in 5 min | SNS alert |
+
+**DLQ message retention:** 14 days. Messages older than 14 days are automatically deleted by SQS.

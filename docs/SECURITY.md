@@ -51,6 +51,8 @@ A single symmetric KMS key per environment encrypts all data at rest:
 | Aurora PostgreSQL | Storage-level encryption | `alias/invoice-{env}` |
 | Secrets Manager (Aurora credentials) | Envelope encryption | `alias/invoice-{env}` |
 | CloudWatch Log Groups (3) | Log group encryption | `alias/invoice-{env}` |
+| VPC Flow Logs Log Group | Log group encryption | `alias/invoice-{env}` |
+| Lambda DLQ (SQS) | Queue encryption | `alias/invoice-{env}` |
 | Performance Insights (Stage/Prod) | PI data encryption | `alias/invoice-{env}` |
 | SNS Alert Topic | Topic encryption | `alias/invoice-{env}` |
 
@@ -149,7 +151,9 @@ The S3 Gateway Endpoint has a **scoped policy** that restricts access to invoice
     "arn:aws:s3:::invoice-docs-*",
     "arn:aws:s3:::invoice-docs-*/*",
     "arn:aws:s3:::invoice-landing-*",
-    "arn:aws:s3:::invoice-landing-*/*"
+    "arn:aws:s3:::invoice-landing-*/*",
+    "arn:aws:s3:::invoice-firehose-backup-*",
+    "arn:aws:s3:::invoice-firehose-backup-*/*"
   ]
 }
 ```
@@ -161,6 +165,8 @@ This prevents workloads in the VPC from accessing other S3 buckets through the e
 All VPC traffic (ACCEPT and REJECT) is logged to CloudWatch Logs:
 - Log group: `/aws/vpc/invoice-vpc-{env}/flow-logs`
 - Retention: 90 days
+- Encryption: KMS (`alias/invoice-{env}`)
+- IAM policy scoped to specific log group ARN (not `*`)
 - Useful for: security investigation, connectivity debugging, compliance audits
 
 ## Identity and Access Management
@@ -274,6 +280,7 @@ The landing zone bucket (`invoice-landing-{env}`) is a transient staging area fo
 | SSE-KMS Encryption | Yes (same KMS key as documents bucket) |
 | Public Access Block | All 4 blocks enabled |
 | HTTPS-Only Policy | Yes |
+| Versioning | Enabled |
 | Object Lock | No (files are transient, deleted after processing) |
 | Lifecycle (expire) | 7 days (safety net for unprocessed files) |
 | Multipart Abort | 1 day |

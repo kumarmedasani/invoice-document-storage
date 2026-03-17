@@ -63,6 +63,14 @@ resource "aws_s3_bucket_policy" "landing" {
   })
 }
 
+resource "aws_s3_bucket_versioning" "landing" {
+  bucket = aws_s3_bucket.landing.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "landing" {
   bucket = aws_s3_bucket.landing.id
 
