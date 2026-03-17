@@ -121,3 +121,25 @@ module "iam" {
   master_secret_arn  = module.aurora_postgres.master_secret_arn
   tags               = local.common_tags
 }
+
+# -----------------------------------------------------------------------------
+# Lambda Ingestion (depends on: iam, networking, monitoring, transfer_family,
+#                                s3_documents, aurora, kms)
+# SNS subscription triggers Lambda when files land in the landing bucket.
+# -----------------------------------------------------------------------------
+module "lambda_ingestion" {
+  source = "../../modules/lambda_ingestion"
+
+  env                            = var.env
+  lambda_role_arn                = module.iam.lambda_role_arn
+  app_subnet_ids                 = module.networking.app_subnet_ids
+  sg_app_id                      = module.networking.sg_app_id
+  file_notification_sns_topic_arn = module.monitoring.file_notification_sns_topic_arn
+  landing_bucket_name            = module.transfer_family.landing_bucket_name
+  documents_bucket_name          = module.s3_documents.bucket_id
+  master_secret_arn              = module.aurora_postgres.master_secret_arn
+  db_endpoint                    = module.aurora_postgres.writer_endpoint
+  kms_key_arn                    = module.kms.key_arn
+  log_group_name                 = module.monitoring.log_group_application
+  tags                           = local.common_tags
+}

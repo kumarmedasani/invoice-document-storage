@@ -169,7 +169,7 @@ All VPC traffic (ACCEPT and REJECT) is logged to CloudWatch Logs:
 
 | Role | Trust Principal | Permissions |
 |---|---|---|
-| `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | S3 (documents + landing), KMS, Secrets Manager, CloudWatch Logs |
+| `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | S3 (documents + landing), KMS, Secrets Manager, CloudWatch Logs, `AWSLambdaVPCAccessExecutionRole` (ENI management for VPC attachment) |
 | `invoice-sftp-logging-{env}` | `transfer.amazonaws.com` | CloudWatch Logs (Transfer Family structured logging) |
 | `invoice-sftp-user-{env}` | `transfer.amazonaws.com` | S3 PutObject on landing bucket, KMS encrypt |
 | `invoice-migration-{env}` | `datasync.amazonaws.com`, root account | S3, KMS |

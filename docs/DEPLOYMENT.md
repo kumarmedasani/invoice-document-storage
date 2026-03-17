@@ -304,6 +304,11 @@ aws firehose describe-delivery-stream \
 aws sns get-topic-attributes \
   --topic-arn $(terraform output -raw file_notification_sns_topic_arn) \
   --query 'Attributes.TopicArn'
+
+# Verify Lambda function exists and is VPC-attached
+aws lambda get-function-configuration \
+  --function-name "invoice-ingestion-prod" \
+  --query '{State:State,Runtime:Runtime,VpcConfig:VpcConfig.SubnetIds}'
 ```
 
 ## Post-Deployment Tasks

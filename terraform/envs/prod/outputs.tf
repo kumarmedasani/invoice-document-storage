@@ -67,3 +67,13 @@ output "firehose_delivery_stream_name" {
   description = "Kinesis Firehose delivery stream name for Splunk"
   value       = module.monitoring.firehose_delivery_stream_name
 }
+
+output "lambda_function_name" {
+  description = "Ingestion Lambda function name"
+  value       = module.lambda_ingestion.function_name
+}
+
+output "lambda_function_arn" {
+  description = "Ingestion Lambda function ARN"
+  value       = module.lambda_ingestion.function_arn
+}

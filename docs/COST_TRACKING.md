@@ -35,15 +35,17 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | VPC Flow Logs | ~$2 | ~$2 | ~$5 | CloudWatch Logs ingestion |
 | Kinesis Firehose (Splunk) | ~$5 | ~$10 | ~$20 | $0.029/GB ingested |
 | S3 Firehose Backup Bucket | < $1 | < $1 | < $1 | Failed deliveries only, 14-day expiry |
+| Lambda (Ingestion) | < $1 | < $1 | ~$1 | Free tier covers most; scales with invocations |
 | SNS (2 topics) | < $1 | < $1 | < $1 | Alerts + file notifications |
 | Data Transfer | ~$2 | ~$5 | ~$10 | Within-AZ mostly free |
-| **Monthly Total** | **~$135** | **~$302** | **~$611** | |
-| **Annual Total** | **~$1,620** | **~$3,624** | **~$7,332** | |
+| **Monthly Total** | **~$136** | **~$303** | **~$613** | |
+| **Annual Total** | **~$1,632** | **~$3,636** | **~$7,356** | |
 
 ### Cost Notes
 
 - **No NAT Gateway** — All environments use VPC endpoints instead of NAT Gateways, eliminating ~$35-96/month in NAT costs
 - **AWS Transfer Family** costs $0.30/hour (~$219/month) for the SFTP server plus $0.04/GB for data uploaded
+- **Lambda ingestion** is effectively free at low volume — the AWS Free Tier includes 1M requests and 400,000 GB-seconds/month. At 10,000 files/month with 512 MB / 5s average, costs are ~$0.20/month
 - **S3 landing zone** costs are negligible — files are transient (7-day expiry) and deleted by Lambda after processing
 - **S3 costs scale with data volume** — the Glacier and Deep Archive estimates assume steady-state after migration
 - **KMS bucket keys** reduce KMS API costs by ~99% — S3 uses a bucket-level key instead of per-object KMS calls

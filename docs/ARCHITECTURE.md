@@ -98,15 +98,18 @@ This section documents every component shown in the architecture diagram, why it
 | **Subscribers** | Ingestion Lambda (for processing), external email system (for customer notification) |
 | **Encryption** | KMS-encrypted with the environment key |
 
-#### Ingestion Lambda
+#### Ingestion Lambda (`invoice-ingestion-{env}`)
 
 | Attribute | Details |
 |---|---|
 | **What it is** | AWS Lambda function triggered by SNS when files land in the landing zone bucket |
 | **Why it's needed** | The core processing engine for the ingestion pipeline. It handles: (1) Downloading the file from the landing zone. (2) Extracting ZIP archives into individual PDFs. (3) Writing each document to the permanent documents bucket with the correct S3 key convention. (4) Inserting document metadata into Aurora PostgreSQL. (5) Deleting the processed file from the landing zone |
 | **Alternative considered** | ECS Fargate tasks — removed because Lambda's event-driven model is a better fit for the bursty, file-triggered workload. No long-running containers needed |
+| **Runtime** | Python 3.12, JSON structured logging |
 | **VPC attachment** | Deployed in app subnets (private) to access Aurora via RDS Proxy and S3 via VPC Gateway Endpoint |
-| **IAM permissions** | Cross-bucket: `GetObject`+`DeleteObject` on landing bucket, `PutObject`+`GetObject` on documents bucket, plus KMS, Secrets Manager, and CloudWatch Logs |
+| **IAM role** | `invoice-ingestion-lambda-{env}` — cross-bucket: `GetObject`+`DeleteObject` on landing bucket, `PutObject`+`GetObject` on documents bucket, plus KMS, Secrets Manager, and CloudWatch Logs. Also attached: `AWSLambdaVPCAccessExecutionRole` for ENI management |
+| **SNS trigger** | Subscribed to `invoice-file-notifications-{env}` topic with `lambda:InvokeFunction` permission |
+| **Terraform module** | `lambda_ingestion` — deploys with a stub handler; CI/CD pipeline replaces with real code |
 
 ### Document Storage
 
@@ -413,6 +416,7 @@ graph LR
     s3["s3_documents<br/>(Bucket, Lifecycle,<br/>Object Lock, Logging)"]
     transfer["transfer_family<br/>(SFTP Server, Landing Bucket,<br/>S3 Notification)"]
     iam["iam<br/>(Lambda Role,<br/>Migration Role)"]
+    lambda["lambda_ingestion<br/>(Function, SNS Trigger,<br/>VPC Config)"]
 
     networking --> aurora
     kms --> aurora
@@ -427,6 +431,13 @@ graph LR
     transfer -->|landing_bucket_arn| iam
     kms --> iam
     aurora -->|master_secret_arn| iam
+    iam -->|lambda_role_arn| lambda
+    networking -->|app_subnet_ids, sg_app_id| lambda
+    monitoring -->|file_notification_sns_topic_arn, log_group| lambda
+    transfer -->|landing_bucket_name| lambda
+    s3 -->|bucket_id| lambda
+    aurora -->|writer_endpoint, master_secret_arn| lambda
+    kms --> lambda
 
     style networking fill:#e3f2fd,stroke:#1976d2
     style kms fill:#fff3e0,stroke:#f57c00
@@ -434,6 +445,7 @@ graph LR
     style monitoring fill:#fce4ec,stroke:#c62828
     style s3 fill:#f3e5f5,stroke:#7b1fa2
     style iam fill:#fff8e1,stroke:#f9a825
+    style lambda fill:#e0f2f1,stroke:#00897b
 ```
 
 **Key dependency decisions:**

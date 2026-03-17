@@ -123,6 +123,7 @@ invoice-document-storage/
 │   │   ├── kms/                       # KMS key, alias, and policy
 │   │   ├── monitoring/                # CloudWatch, SNS, dashboard
 │   │   ├── networking/                # VPC, subnets, endpoints, security groups
+│   │   ├── lambda_ingestion/          # Ingestion Lambda, SNS trigger, VPC config
 │   │   ├── s3_documents/              # S3 bucket, lifecycle, Object Lock
 │   │   └── transfer_family/           # SFTP server, landing zone bucket
 │   └── shared/
@@ -150,13 +151,13 @@ invoice-document-storage/
 
 ## Terraform Modules
 
-The infrastructure is split into 7 modules with a clear dependency chain:
+The infrastructure is split into 8 modules with a clear dependency chain:
 
 ```
 networking ──┐
              ├──> aurora_postgres ──┐
 kms ─────────┤                     ├──> monitoring ──┬──> s3_documents ──┐
-             └─────────────────────┘                 └──> transfer_family ──> iam
+             └─────────────────────┘                 └──> transfer_family ──> iam ──> lambda_ingestion
 ```
 
 | Module | Resources Created | Key Outputs |
@@ -168,6 +169,7 @@ kms ─────────┤                     ├──> monitoring ─
 | `s3_documents` | S3 bucket with versioning, SSE-KMS (bucket key), public access block, HTTPS-only policy, lifecycle rules (Standard->Glacier->Deep Archive->Expire), Object Lock (conditional), access logging bucket, SNS notification (conditional) | `bucket_id`, `bucket_arn` |
 | `transfer_family` | AWS Transfer Family SFTP server, landing zone S3 bucket (`invoice-landing-{env}`) with SSE-KMS, 7-day expiry, S3 event notification → SNS, SFTP user/logging IAM roles | `sftp_server_endpoint`, `landing_bucket_arn`, `landing_bucket_name` |
 | `iam` | Lambda ingestion role (cross-bucket: read+delete landing, read+write documents), migration role (DataSync + manual assume) | `lambda_role_arn`, `migration_role_arn` |
+| `lambda_ingestion` | Lambda function (`invoice-ingestion-{env}`) with VPC config, SNS topic subscription, `AWSLambdaVPCAccessExecutionRole`, stub handler (replaced by CI/CD) | `function_name`, `function_arn` |
 
 ## S3 Key Convention
 
