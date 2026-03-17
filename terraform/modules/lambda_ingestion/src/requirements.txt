@@ -1,0 +1,7 @@
+# Lambda dependencies for invoice-ingestion function.
+# CI/CD pipeline installs these into the deployment package:
+#   pip install -r requirements.txt -t package/
+#
+# The stub handler uses only stdlib; add dependencies here as the
+# real implementation evolves.
+boto3>=1.34,<2
