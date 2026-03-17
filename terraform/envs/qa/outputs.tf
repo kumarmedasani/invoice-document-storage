@@ -52,3 +52,8 @@ output "sftp_server_endpoint" {
   description = "Transfer Family SFTP server endpoint"
   value       = module.transfer_family.sftp_server_endpoint
 }
+
+output "landing_bucket_name" {
+  description = "Landing zone S3 bucket name"
+  value       = module.transfer_family.landing_bucket_name
+}

@@ -90,17 +90,17 @@ module "s3_documents" {
 }
 
 # -----------------------------------------------------------------------------
-# Transfer Family SFTP (depends on: s3, kms, monitoring)
-# Vendors drop invoice files via SFTP → lands in S3 → triggers ingestion
+# Transfer Family SFTP (depends on: kms, monitoring)
+# Vendors drop files via SFTP → landing zone bucket → SNS → Lambda
 # -----------------------------------------------------------------------------
 module "transfer_family" {
   source = "../../modules/transfer_family"
 
-  env           = var.env
-  s3_bucket_arn = module.s3_documents.bucket_arn
-  kms_key_arn   = module.kms.key_arn
-  log_group_arn = module.monitoring.log_group_application_arn
-  tags          = local.common_tags
+  env                        = var.env
+  kms_key_arn                = module.kms.key_arn
+  log_group_arn              = module.monitoring.log_group_application_arn
+  notification_sns_topic_arn = module.monitoring.sns_topic_arn
+  tags                       = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -112,8 +112,9 @@ module "iam" {
   env               = var.env
   aws_account_id    = var.aws_account_id
   aws_region        = var.aws_region
-  s3_bucket_arn     = module.s3_documents.bucket_arn
-  kms_key_arn       = module.kms.key_arn
-  master_secret_arn = module.aurora_postgres.master_secret_arn
-  tags              = local.common_tags
+  s3_bucket_arn      = module.s3_documents.bucket_arn
+  landing_bucket_arn = module.transfer_family.landing_bucket_arn
+  kms_key_arn        = module.kms.key_arn
+  master_secret_arn  = module.aurora_postgres.master_secret_arn
+  tags               = local.common_tags
 }

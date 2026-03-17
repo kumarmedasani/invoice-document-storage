@@ -120,11 +120,14 @@ resource "aws_vpc_endpoint" "s3" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
+          "s3:DeleteObject",
           "s3:ListBucket"
         ]
         Resource = [
           "arn:aws:s3:::invoice-docs-*",
-          "arn:aws:s3:::invoice-docs-*/*"
+          "arn:aws:s3:::invoice-docs-*/*",
+          "arn:aws:s3:::invoice-landing-*",
+          "arn:aws:s3:::invoice-landing-*/*"
         ]
       }
     ]

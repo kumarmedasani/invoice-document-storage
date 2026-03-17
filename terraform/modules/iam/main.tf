@@ -11,23 +11,40 @@ resource "aws_iam_policy" "ingestion" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3Access"
+        Sid    = "S3DocumentsAccess"
         Effect = "Allow"
         Action = [
           "s3:PutObject",
           "s3:GetObject",
           "s3:GetObjectVersion",
-          "s3:DeleteObject",
         ]
         Resource = "${var.s3_bucket_arn}/*"
       },
       {
-        Sid    = "S3ListBucket"
+        Sid    = "S3DocumentsListBucket"
         Effect = "Allow"
         Action = [
           "s3:ListBucket"
         ]
         Resource = var.s3_bucket_arn
+      },
+      {
+        Sid    = "S3LandingRead"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:DeleteObject",
+        ]
+        Resource = "${var.landing_bucket_arn}/*"
+      },
+      {
+        Sid    = "S3LandingListBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = var.landing_bucket_arn
       },
       {
         Sid    = "KMSAccess"
