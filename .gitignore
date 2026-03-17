@@ -3,7 +3,8 @@
 *.tfstate
 *.tfstate.backup
 *.tfplan
-.terraform.lock.hcl
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — it should be committed
+# to ensure reproducible provider versions across the team.
 
 # Python
 __pycache__/

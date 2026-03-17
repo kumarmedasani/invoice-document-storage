@@ -114,6 +114,80 @@ CREATE TABLE IF NOT EXISTS collection_letter_details (
 );
 
 -- =============================================================================
+-- Trigger: enforce FK from detail tables to documents
+-- PostgreSQL 16 does not support standard FK references to partitioned tables
+-- without including the partition key. This trigger enforces referential integrity.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION invoice_docs.enforce_document_fk()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM invoice_docs.documents WHERE id = NEW.document_id
+    ) THEN
+        RAISE EXCEPTION 'document_id % does not exist in documents table', NEW.document_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_invoice_details_fk') THEN
+        CREATE TRIGGER trg_invoice_details_fk
+            BEFORE INSERT OR UPDATE ON invoice_docs.invoice_details
+            FOR EACH ROW
+            EXECUTE FUNCTION invoice_docs.enforce_document_fk();
+    END IF;
+END
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_collection_letter_fk') THEN
+        CREATE TRIGGER trg_collection_letter_fk
+            BEFORE INSERT OR UPDATE ON invoice_docs.collection_letter_details
+            FOR EACH ROW
+            EXECUTE FUNCTION invoice_docs.enforce_document_fk();
+    END IF;
+END
+$$;
+
+-- =============================================================================
+-- Function: auto-create yearly partitions
+-- Run via pg_cron or a scheduled Lambda to ensure future partitions exist.
+-- =============================================================================
+CREATE OR REPLACE FUNCTION invoice_docs.create_yearly_partition(target_year INTEGER)
+RETURNS TEXT AS $$
+DECLARE
+    partition_name TEXT;
+    start_date TEXT;
+    end_date TEXT;
+BEGIN
+    partition_name := 'documents_y' || target_year;
+    start_date := target_year || '-01-01';
+    end_date := (target_year + 1) || '-01-01';
+
+    IF EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'invoice_docs' AND c.relname = partition_name
+    ) THEN
+        RETURN 'Partition ' || partition_name || ' already exists';
+    END IF;
+
+    EXECUTE format(
+        'CREATE TABLE invoice_docs.%I PARTITION OF invoice_docs.documents FOR VALUES FROM (%L) TO (%L)',
+        partition_name, start_date, end_date
+    );
+
+    RETURN 'Created partition ' || partition_name;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Pre-create next year's partition
+SELECT invoice_docs.create_yearly_partition(EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER + 1);
+
+-- =============================================================================
 -- Indexes
 -- =============================================================================
 CREATE INDEX IF NOT EXISTS idx_documents_account_received
@@ -200,7 +274,14 @@ $$;
 
 GRANT USAGE ON SCHEMA invoice_docs TO invoice_app;
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA invoice_docs TO invoice_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA invoice_docs TO invoice_app;
 -- No DELETE permission for application role — deletions are status updates only
+
+-- Ensure future tables/sequences also get the correct grants
+ALTER DEFAULT PRIVILEGES IN SCHEMA invoice_docs
+    GRANT SELECT, INSERT, UPDATE ON TABLES TO invoice_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA invoice_docs
+    GRANT USAGE ON SEQUENCES TO invoice_app;
 
 -- Read-only role (used by reporting/BI tools)
 DO $$
@@ -213,3 +294,7 @@ $$;
 
 GRANT USAGE ON SCHEMA invoice_docs TO invoice_readonly;
 GRANT SELECT ON ALL TABLES IN SCHEMA invoice_docs TO invoice_readonly;
+
+-- Ensure future tables are also readable
+ALTER DEFAULT PRIVILEGES IN SCHEMA invoice_docs
+    GRANT SELECT ON TABLES TO invoice_readonly;

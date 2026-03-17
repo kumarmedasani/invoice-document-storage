@@ -69,9 +69,21 @@ jobs:
       - name: Terraform fmt check
         run: terraform fmt -check -recursive terraform/
 
+  security-scan:
+    name: Security Scan (tfsec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: terraform/
+          soft_fail: true
+
   plan:
     name: "Plan: ${{ matrix.environment }}"
-    needs: [detect-environment, fmt-check]
+    needs: [detect-environment, fmt-check, security-scan]
     if: needs.detect-environment.outputs.environments != '[]'
     runs-on: ubuntu-latest
     strategy:
@@ -141,6 +153,7 @@ jobs:
         with:
           name: tfplan-${{ matrix.environment }}
           path: terraform/envs/${{ matrix.environment }}/${{ matrix.environment }}.tfplan
+          retention-days: 5
 
   apply:
     name: "Apply: ${{ matrix.environment }}"
@@ -169,6 +182,12 @@ jobs:
         working-directory: terraform/envs/${{ matrix.environment }}
         run: terraform init
 
-      - name: Terraform Apply
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ matrix.environment }}
+          path: terraform/envs/${{ matrix.environment }}
+
+      - name: Terraform Apply (saved plan)
         working-directory: terraform/envs/${{ matrix.environment }}
-        run: terraform apply -auto-approve
+        run: terraform apply ${{ matrix.environment }}.tfplan

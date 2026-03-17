@@ -7,6 +7,10 @@ provider "aws" {
 resource "aws_s3_bucket" "tfstate" {
   bucket = "invoice-tfstate-${var.aws_account_id}"
 
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = merge(var.tags, {
     Name = "invoice-tfstate-${var.aws_account_id}"
   })
@@ -62,7 +66,56 @@ resource "aws_dynamodb_table" "tfstate_lock" {
     type = "S"
   }
 
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
   tags = merge(var.tags, {
     Name = "invoice-tfstate-lock"
+  })
+}
+
+# Bucket policy: deny deletion of state objects by non-admin principals
+resource "aws_s3_bucket_policy" "tfstate" {
+  bucket = aws_s3_bucket.tfstate.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnforceHTTPS"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.tfstate.arn,
+          "${aws_s3_bucket.tfstate.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        Sid       = "DenyObjectDeletion"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ]
+        Resource = "${aws_s3_bucket.tfstate.arn}/*"
+        Condition = {
+          StringNotLike = {
+            "aws:PrincipalArn" = "arn:aws:iam::${var.aws_account_id}:role/admin-*"
+          }
+        }
+      }
+    ]
   })
 }
