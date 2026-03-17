@@ -66,16 +66,5 @@ resource "aws_lambda_function" "ingestion" {
 data "archive_file" "stub" {
   type        = "zip"
   output_path = "${path.module}/stub.zip"
-
-  source {
-    content  = <<-PYTHON
-      import json
-
-      def handler(event, context):
-          """Stub handler — replace with real ingestion code via CI/CD."""
-          print(json.dumps({"message": "stub handler invoked", "event": event}))
-          return {"statusCode": 200}
-    PYTHON
-    filename = "index.py"
-  }
+  source_file = "${path.module}/src/index.py"
 }
