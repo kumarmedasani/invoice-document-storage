@@ -26,7 +26,7 @@ This project provides a complete infrastructure-as-code (Terraform) solution for
 - **AWS KMS** for encryption at rest across all services (S3, Aurora, Secrets Manager, CloudWatch Logs)
 - **AWS Transfer Family (SFTP)** for vendor file ingestion into a landing zone S3 bucket, with Lambda processing (ZIP extraction) into the documents bucket
 - **VPC** with private-only subnets, VPC endpoints (S3 Gateway, Secrets Manager, KMS, CloudWatch, STS), no internet egress, and VPC Flow Logs
-- **CloudWatch** for monitoring with 6 metric alarms, a unified dashboard, and KMS-encrypted log groups
+- **CloudWatch** for monitoring with 9 metric alarms (Aurora, S3, KMS, Lambda, DLQ), a unified dashboard, and KMS-encrypted log groups
 - **Kinesis Data Firehose** for streaming all CloudWatch Logs to Splunk (per-environment index via HEC token)
 - **SNS** for infrastructure alerting and file drop notifications (external systems subscribe for customer email)
 
@@ -71,7 +71,8 @@ terraform init && terraform apply -var="aws_account_id=YOUR_ACCOUNT_ID"
 # 2. Deploy QA environment
 cd ../../envs/qa
 # Edit terraform.tfvars: set aws_account_id, alert_email
-terraform init && terraform validate && terraform plan -out=qa.tfplan
+terraform init -backend-config="bucket=invoice-tfstate-YOUR_ACCOUNT_ID"
+terraform validate && terraform plan -out=qa.tfplan
 terraform apply qa.tfplan
 
 # 3. Apply database schema
@@ -123,6 +124,7 @@ invoice-document-storage/
 │   │   ├── kms/                       # KMS key, alias, and policy
 │   │   ├── monitoring/                # CloudWatch, SNS, dashboard
 │   │   ├── networking/                # VPC, subnets, endpoints, security groups
+│   │   ├── lambda_ingestion/          # Ingestion Lambda, SNS trigger, VPC config
 │   │   ├── s3_documents/              # S3 bucket, lifecycle, Object Lock
 │   │   └── transfer_family/           # SFTP server, landing zone bucket
 │   └── shared/
@@ -150,13 +152,13 @@ invoice-document-storage/
 
 ## Terraform Modules
 
-The infrastructure is split into 7 modules with a clear dependency chain:
+The infrastructure is split into 8 modules with a clear dependency chain:
 
 ```
 networking ──┐
              ├──> aurora_postgres ──┐
 kms ─────────┤                     ├──> monitoring ──┬──> s3_documents ──┐
-             └─────────────────────┘                 └──> transfer_family ──> iam
+             └─────────────────────┘                 └──> transfer_family ──> iam ──> lambda_ingestion
 ```
 
 | Module | Resources Created | Key Outputs |
@@ -164,10 +166,11 @@ kms ─────────┤                     ├──> monitoring ─
 | `networking` | VPC, app/data subnets, S3 Gateway Endpoint, 5 Interface Endpoints (Secrets Manager, KMS, CloudWatch, Logs, STS), 3 security groups, VPC Flow Logs | `vpc_id`, `app_subnet_ids`, `data_subnet_ids`, `sg_app_id`, `sg_aurora_id` |
 | `kms` | KMS symmetric key (rotation enabled), alias `alias/invoice-{env}`, key policy with root admin, Aurora grant, CloudWatch Logs, and non-root deletion deny | `key_arn`, `key_id` |
 | `aurora_postgres` | Aurora PostgreSQL 16.2 cluster, N instances, DB subnet group, parameter group (force SSL, logging), Enhanced Monitoring role, optional RDS Proxy with IAM role | `cluster_id`, `writer_endpoint`, `reader_endpoint`, `master_secret_arn` |
-| `monitoring` | 3 CloudWatch log groups, 2 SNS topics (alerts + file notifications), 6 CloudWatch alarms, dashboard (6 widgets), Kinesis Firehose → Splunk (optional), subscription filters | `sns_topic_arn`, `file_notification_sns_topic_arn`, log group names, `dashboard_name`, `firehose_delivery_stream_name` |
+| `monitoring` | 4 CloudWatch log groups (application, aurora, migration, sftp), 2 SNS topics (alerts + file notifications), 6 CloudWatch alarms (Aurora, S3, KMS), dashboard (6 widgets), Kinesis Firehose → Splunk (optional), subscription filters | `sns_topic_arn`, `file_notification_sns_topic_arn`, log group names/ARNs, `dashboard_name`, `firehose_delivery_stream_name` |
 | `s3_documents` | S3 bucket with versioning, SSE-KMS (bucket key), public access block, HTTPS-only policy, lifecycle rules (Standard->Glacier->Deep Archive->Expire), Object Lock (conditional), access logging bucket, SNS notification (conditional) | `bucket_id`, `bucket_arn` |
 | `transfer_family` | AWS Transfer Family SFTP server, landing zone S3 bucket (`invoice-landing-{env}`) with SSE-KMS, 7-day expiry, S3 event notification → SNS, SFTP user/logging IAM roles | `sftp_server_endpoint`, `landing_bucket_arn`, `landing_bucket_name` |
 | `iam` | Lambda ingestion role (cross-bucket: read+delete landing, read+write documents), migration role (DataSync + manual assume) | `lambda_role_arn`, `migration_role_arn` |
+| `lambda_ingestion` | Lambda function (`invoice-ingestion-{env}`) with VPC config, SNS topic subscription, `AWSLambdaVPCAccessExecutionRole`, stub handler (replaced by CI/CD), SQS DLQ (14-day retention, KMS encrypted), 3 CloudWatch alarms (errors, throttles, DLQ depth) | `function_name`, `function_arn`, `dlq_arn`, `dlq_url` |
 
 ## S3 Key Convention
 
@@ -240,9 +243,9 @@ The GitHub Actions workflow (`.github/workflows/terraform-plan.yml`) provides:
 2. **Format Check** — Validates `terraform fmt` compliance
 3. **Security Scan** — Runs tfsec static analysis on all Terraform code
 4. **Plan** — Runs `terraform plan` for each affected environment, comments plan output on PRs
-5. **Apply** — On merge to `main`, downloads the saved plan artifact and applies it (no re-plan drift risk)
+5. **Apply** — On merge to `main`, downloads the saved plan artifact and applies it in strict order: QA → Stage → Prod (no re-plan drift risk)
 
-The apply job uses GitHub Environments for approval gates. Configure required reviewers on the `prod` environment in your repository settings to enforce manual approval before production applies.
+The apply jobs are chained with explicit dependencies: Stage waits for QA to succeed, Prod waits for Stage. Each uses GitHub Environments for approval gates. Configure required reviewers on the `prod` environment in your repository settings to enforce manual approval before production applies.
 
 ## Promotion Workflow
 
@@ -265,7 +268,7 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment procedures.
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System topology, data flow diagrams, storage lifecycle, security boundaries |
 | [DATABASE.md](docs/DATABASE.md) | Schema design, partitioning strategy, roles, triggers, migration helpers |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Step-by-step deployment guide, rollback procedures, promotion checklist |
-| [OPERATIONS.md](docs/OPERATIONS.md) | 15 operational runbooks for day-to-day tasks, SFTP, Splunk, and troubleshooting |
+| [OPERATIONS.md](docs/OPERATIONS.md) | 16 operational runbooks for day-to-day tasks, SFTP, DLQ, Splunk, and troubleshooting |
 | [COST_TRACKING.md](docs/COST_TRACKING.md) | Cost estimates, AWS Budgets setup, anomaly detection, optimization tips |
 | [SECURITY.md](docs/SECURITY.md) | Security controls, encryption, network isolation, IAM, compliance |
 | [DataSync Setup](migration/datasync-setup.md) | File migration from Windows file share to S3 via AWS DataSync |
@@ -282,3 +285,4 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment procedures.
 | `splunk_hec_endpoint` | `terraform.tfvars` (all envs) | Splunk HEC endpoint URL (empty to disable) |
 | `splunk_hec_token` | `terraform.tfvars` (all envs) | Splunk HEC token (per-env, routes to correct index) |
 | `AWS_ROLE_ARN_*` | GitHub repo secrets | Per-environment IAM role ARNs for CI/CD |
+| `TF_STATE_BUCKET` | GitHub repo secrets | S3 bucket name for Terraform state (e.g., `invoice-tfstate-123456789012`) |

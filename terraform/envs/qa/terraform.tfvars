@@ -3,10 +3,8 @@ aws_account_id = "123456789012"
 env            = "qa"
 
 # Networking
-vpc_cidr           = "10.10.0.0/16"
-az_count           = 2
-enable_nat_gateway = false
-single_nat_gateway = false
+vpc_cidr = "10.10.0.0/16"
+az_count = 2
 
 # Aurora
 aurora_instance_class        = "db.t4g.medium"
@@ -28,5 +26,3 @@ log_retention_days = 90
 # Tags
 cost_center = "IT-1042"
 
-# Runtime
-ingestion_runtime = "lambda"

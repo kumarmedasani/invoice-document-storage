@@ -15,6 +15,10 @@ resource "aws_s3_bucket" "documents" {
   tags = merge(var.tags, {
     Name = local.bucket_name
   })
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_s3_bucket_versioning" "documents" {
@@ -143,6 +147,16 @@ resource "aws_s3_bucket" "access_logs" {
   tags = merge(var.tags, {
     Name = "${local.bucket_name}-access-logs"
   })
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "access_logs" {

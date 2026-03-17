@@ -7,6 +7,7 @@ locals {
     application = aws_cloudwatch_log_group.application.name
     aurora      = aws_cloudwatch_log_group.aurora.name
     migration   = aws_cloudwatch_log_group.migration.name
+    sftp        = aws_cloudwatch_log_group.sftp.name
   }
 }
 
@@ -40,6 +41,16 @@ resource "aws_cloudwatch_log_group" "migration" {
 
   tags = merge(var.tags, {
     Name = "invoice-log-migration-${var.env}"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "sftp" {
+  name              = "/invoice/sftp/${var.env}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "invoice-log-sftp-${var.env}"
   })
 }
 
@@ -361,6 +372,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "firehose_backup" 
   }
 }
 
+resource "aws_s3_bucket_versioning" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = aws_s3_bucket.firehose_backup[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "firehose_backup" {
   count  = local.enable_splunk ? 1 : 0
   bucket = aws_s3_bucket.firehose_backup[0].id
@@ -431,6 +451,10 @@ resource "aws_kinesis_firehose_delivery_stream" "splunk" {
   count       = local.enable_splunk ? 1 : 0
   name        = "invoice-logs-to-splunk-${var.env}"
   destination = "splunk"
+
+  server_side_encryption {
+    enabled = false
+  }
 
   splunk_configuration {
     hec_endpoint      = var.splunk_hec_endpoint

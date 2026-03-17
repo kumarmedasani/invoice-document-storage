@@ -125,7 +125,7 @@ cd terraform/envs/qa
 #   alert_email    = "team@example.com"
 
 # Initialize (downloads providers, configures S3 backend)
-terraform init
+terraform init -backend-config="bucket=invoice-tfstate-YOUR_ACCOUNT_ID"
 
 # Validate HCL syntax and module references
 terraform validate
@@ -185,6 +185,8 @@ The smoke test validates:
 2. Secrets Manager access for Aurora credentials
 3. Aurora PostgreSQL connectivity (`SELECT 1`)
 4. CloudWatch alarms exist and are in expected state
+5. Lambda ingestion function exists and is Active
+6. Transfer Family SFTP server is ONLINE
 
 ### Post-Deploy: Confirm SNS Subscription
 
@@ -205,7 +207,7 @@ If the status shows `PendingConfirmation`, the email has not been confirmed yet.
 cd terraform/envs/stage
 
 # Update terraform.tfvars (same placeholders as QA)
-terraform init
+terraform init -backend-config="bucket=invoice-tfstate-YOUR_ACCOUNT_ID"
 terraform validate
 terraform plan -out=stage.tfplan
 
@@ -241,7 +243,7 @@ aws rds describe-db-instances \
 cd terraform/envs/prod
 
 # Update terraform.tfvars
-terraform init
+terraform init -backend-config="bucket=invoice-tfstate-YOUR_ACCOUNT_ID"
 terraform validate
 terraform plan -out=prod.tfplan
 ```
@@ -304,6 +306,11 @@ aws firehose describe-delivery-stream \
 aws sns get-topic-attributes \
   --topic-arn $(terraform output -raw file_notification_sns_topic_arn) \
   --query 'Attributes.TopicArn'
+
+# Verify Lambda function exists and is VPC-attached
+aws lambda get-function-configuration \
+  --function-name "invoice-ingestion-prod" \
+  --query '{State:State,Runtime:Runtime,VpcConfig:VpcConfig.SubnetIds}'
 ```
 
 ## Post-Deployment Tasks
@@ -345,15 +352,15 @@ The GitHub Actions workflow (`.github/workflows/terraform-plan.yml`) automates t
 
 1. **Detect** which environments are affected by the changed files
 2. **Format check** — `terraform fmt -check -recursive`
-3. **Security scan** — tfsec static analysis
+3. **Security scan** — tfsec static analysis (blocks PR on findings)
 4. **Plan** — `terraform plan` for each affected environment, output commented on the PR
 5. **Artifact** — Plan file uploaded for use during apply
 
 ### On Merge to Main
 
 1. **Apply** — Downloads the saved plan artifact and runs `terraform apply` with the exact plan that was reviewed
-2. **Sequential** — Environments are applied one at a time (`max-parallel: 1`)
-3. **Approval gate** — The `environment` field on the apply job integrates with GitHub Environment protection rules. Configure required reviewers on the `prod` environment.
+2. **Ordered** — Environments are applied in strict order: QA → Stage → Prod. Stage waits for QA to succeed (or be skipped), Prod waits for Stage
+3. **Approval gate** — Each apply job uses the `environment` field to integrate with GitHub Environment protection rules. Configure required reviewers on the `prod` environment
 
 **Important:** The apply step uses the saved plan file from the PR, ensuring no drift between what was reviewed and what gets applied. This is safer than re-running `terraform plan` at apply time.
 

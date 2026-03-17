@@ -127,7 +127,9 @@ resource "aws_vpc_endpoint" "s3" {
           "arn:aws:s3:::invoice-docs-*",
           "arn:aws:s3:::invoice-docs-*/*",
           "arn:aws:s3:::invoice-landing-*",
-          "arn:aws:s3:::invoice-landing-*/*"
+          "arn:aws:s3:::invoice-landing-*/*",
+          "arn:aws:s3:::invoice-firehose-backup-*",
+          "arn:aws:s3:::invoice-firehose-backup-*/*"
         ]
       }
     ]
@@ -257,6 +259,7 @@ resource "aws_flow_log" "vpc" {
 resource "aws_cloudwatch_log_group" "flow_logs" {
   name              = "/aws/vpc/invoice-vpc-${var.env}/flow-logs"
   retention_in_days = 90
+  kms_key_id        = var.kms_key_arn != "" ? var.kms_key_arn : null
 
   tags = merge(var.tags, {
     Name = "invoice-vpc-flow-logs-${var.env}"
@@ -300,7 +303,10 @@ resource "aws_iam_role_policy" "flow_logs" {
           "logs:DescribeLogGroups",
           "logs:DescribeLogStreams"
         ]
-        Resource = "*"
+        Resource = [
+          aws_cloudwatch_log_group.flow_logs.arn,
+          "${aws_cloudwatch_log_group.flow_logs.arn}:*"
+        ]
       }
     ]
   })

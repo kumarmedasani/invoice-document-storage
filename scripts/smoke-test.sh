@@ -36,7 +36,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Test 1: S3 Write (SSE-KMS)
 # ---------------------------------------------------------------------------
-echo "[1/4] Testing S3 write with SSE-KMS..."
+echo "[1/6] Testing S3 write with SSE-KMS..."
 if aws s3 cp - "s3://${BUCKET}/${SMOKE_KEY}" \
     --sse aws:kms \
     <<< "smoke-test-$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null; then
@@ -48,7 +48,7 @@ fi
 # ---------------------------------------------------------------------------
 # Test 2: Secrets Manager - Aurora credentials
 # ---------------------------------------------------------------------------
-echo "[2/4] Testing Secrets Manager access..."
+echo "[2/6] Testing Secrets Manager access..."
 
 # Find the Aurora master secret ARN
 SECRET_LIST=$(aws secretsmanager list-secrets \
@@ -73,7 +73,7 @@ fi
 # ---------------------------------------------------------------------------
 # Test 3: Aurora PostgreSQL connectivity
 # ---------------------------------------------------------------------------
-echo "[3/4] Testing Aurora PostgreSQL connectivity..."
+echo "[3/6] Testing Aurora PostgreSQL connectivity..."
 
 if [[ -n "${SECRET_VALUE:-}" ]]; then
     DB_HOST=$(echo "$SECRET_VALUE" | jq -r '.host')
@@ -97,7 +97,7 @@ fi
 # ---------------------------------------------------------------------------
 # Test 4: CloudWatch Alarms
 # ---------------------------------------------------------------------------
-echo "[4/4] Testing CloudWatch alarms exist..."
+echo "[4/6] Testing CloudWatch alarms exist..."
 
 ALARM_COUNT=$(aws cloudwatch describe-alarms \
     --alarm-name-prefix "aurora-cpu-high-${ENV}" \
@@ -124,6 +124,44 @@ if [[ "$ALARM_COUNT" -ge 1 ]]; then
     fi
 else
     fail "No CloudWatch alarms found for ${ENV}"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 5: Lambda Function
+# ---------------------------------------------------------------------------
+echo "[5/6] Testing Lambda function exists and is active..."
+
+LAMBDA_NAME="invoice-ingestion-${ENV}"
+LAMBDA_STATE=$(aws lambda get-function \
+    --function-name "$LAMBDA_NAME" \
+    --query 'Configuration.State' --output text 2>/dev/null || true)
+
+if [[ "$LAMBDA_STATE" == "Active" ]]; then
+    pass "Lambda function ${LAMBDA_NAME} is Active"
+else
+    fail "Lambda function ${LAMBDA_NAME} state: ${LAMBDA_STATE:-not found}"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 6: Transfer Family SFTP Server
+# ---------------------------------------------------------------------------
+echo "[6/6] Testing Transfer Family SFTP server..."
+
+SFTP_SERVERS=$(aws transfer list-servers \
+    --query "Servers[?contains(Tags[?Key=='Name'].Value | [0], '${ENV}')].ServerId" \
+    --output text 2>/dev/null || true)
+
+if [[ -n "$SFTP_SERVERS" ]]; then
+    SFTP_STATE=$(aws transfer describe-server \
+        --server-id "$(echo "$SFTP_SERVERS" | head -1)" \
+        --query 'Server.State' --output text 2>/dev/null || true)
+    if [[ "$SFTP_STATE" == "ONLINE" ]]; then
+        pass "SFTP server is ONLINE"
+    else
+        fail "SFTP server state: ${SFTP_STATE:-unknown}"
+    fi
+else
+    fail "No SFTP server found for environment ${ENV}"
 fi
 
 # ---------------------------------------------------------------------------
