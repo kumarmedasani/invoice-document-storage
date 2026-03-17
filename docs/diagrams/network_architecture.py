@@ -5,8 +5,7 @@ Generates a PNG diagram using official AWS icons via the 'diagrams' library.
 
 from diagrams import Diagram, Cluster, Edge
 from diagrams.aws.network import (
-    VPC, PrivateSubnet, PublicSubnet, NATGateway,
-    InternetGateway, VPCFlowLogs, Endpoint
+    VPC, PrivateSubnet, VPCFlowLogs, Endpoint
 )
 from diagrams.aws.database import Aurora, RDS
 from diagrams.aws.storage import S3
@@ -14,6 +13,7 @@ from diagrams.aws.security import KMS, IAM, SecretsManager
 from diagrams.aws.management import Cloudwatch
 from diagrams.aws.integration import SNS
 from diagrams.aws.compute import Lambda
+from diagrams.aws.migration import TransferForSftp
 from diagrams.aws.general import Users
 from diagrams.onprem.network import Internet
 
@@ -34,6 +34,7 @@ with Diagram(
     outformat="png",
 ):
     # External
+    vendors = Users("Vendors\n(SFTP Clients)")
     on_prem = Users("On-Premises\nLegacy Server")
     internet = Internet("Internet")
 
@@ -46,27 +47,23 @@ with Diagram(
             sns = SNS("SNS\nAlert Topics")
             cw = Cloudwatch("CloudWatch\nMetrics & Alarms")
 
+        # Transfer Family SFTP (public endpoint, outside VPC)
+        sftp = TransferForSftp("AWS Transfer\nFamily (SFTP)")
+
         with Cluster("VPC - invoice-vpc (10.x.0.0/16)"):
 
             flow_logs = VPCFlowLogs("VPC Flow Logs")
 
-            # Internet Gateway
-            igw = InternetGateway("Internet\nGateway")
-
-            # Public NAT Subnets
-            with Cluster("Public Subnets (NAT only)\n10.x.100.0/28 per AZ"):
-                nat_a = NATGateway("NAT GW\nAZ-a")
-                nat_b = NATGateway("NAT GW\nAZ-b")
-
             # App Subnets
             with Cluster("Private App Subnets\n10.x.1.0/24, 10.x.2.0/24, 10.x.3.0/24"):
-                app_lambda = Lambda("Application\n(Lambda / ECS)")
+                app_lambda = Lambda("Ingestion\nLambda")
 
                 with Cluster("VPC Interface Endpoints"):
                     ep_sm = Endpoint("Secrets\nManager")
                     ep_kms = Endpoint("KMS")
                     ep_cw = Endpoint("CloudWatch\nLogs")
                     ep_mon = Endpoint("CloudWatch\nMonitoring")
+                    ep_sts = Endpoint("STS")
 
             # Data Subnets
             with Cluster("Private Data Subnets\n10.x.11.0/24, 10.x.12.0/24, 10.x.13.0/24"):
@@ -84,16 +81,16 @@ with Diagram(
 
     # --- Connections ---
 
-    # External connectivity
+    # Vendor SFTP flow
+    vendors >> Edge(label="SFTP\n(Port 22)", color="darkgreen", style="bold") >> internet
+    internet >> Edge(color="darkgreen") >> sftp
+    sftp >> Edge(label="Upload to\nvendor-uploads/", color="darkorange", style="bold") >> s3_docs
+
+    # On-premises migration
     on_prem >> Edge(label="DataSync /\nETL Migration", color="orange", style="bold") >> internet
-    internet >> Edge(color="darkgreen") >> igw
 
-    # NAT Gateway flow
-    igw >> Edge(color="darkgreen") >> nat_a
-    igw >> Edge(color="darkgreen") >> nat_b
-
-    # App to NAT (outbound internet)
-    app_lambda >> Edge(label="Outbound\nHTTPS", color="blue", style="dashed") >> nat_a
+    # S3 event triggers Lambda
+    s3_docs >> Edge(label="S3 Event →\nSNS → Lambda", color="darkgreen", style="bold") >> app_lambda
 
     # App to Aurora via RDS Proxy
     app_lambda >> Edge(label="Port 5432\n(TLS required)", color="purple", style="bold") >> rds_proxy
@@ -110,11 +107,13 @@ with Diagram(
     ep_kms >> Edge(color="gray", style="dotted") >> kms
     ep_cw >> Edge(color="gray", style="dotted") >> cw
     ep_mon >> Edge(color="gray", style="dotted") >> cw
+    ep_sts >> Edge(color="gray", style="dotted") >> IAM("STS\nService")
 
     # Monitoring
     flow_logs >> Edge(color="red", style="dashed") >> cw
     aurora_primary >> Edge(label="PG Logs &\nMetrics", color="red", style="dashed") >> cw
     cw >> Edge(label="Alarms", color="red") >> sns
+    sftp >> Edge(label="SFTP Logs", color="red", style="dashed") >> cw
 
     # Encryption
     aurora_primary >> Edge(color="gold", style="dotted", label="Encryption") >> kms
