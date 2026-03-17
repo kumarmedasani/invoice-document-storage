@@ -26,6 +26,12 @@ variable "aws_region" {
   type        = string
 }
 
+variable "kms_key_arn" {
+  description = "ARN of the KMS key for encrypting VPC Flow Logs log group"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)

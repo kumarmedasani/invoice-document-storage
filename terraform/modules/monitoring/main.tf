@@ -432,6 +432,10 @@ resource "aws_kinesis_firehose_delivery_stream" "splunk" {
   name        = "invoice-logs-to-splunk-${var.env}"
   destination = "splunk"
 
+  server_side_encryption {
+    enabled = false
+  }
+
   splunk_configuration {
     hec_endpoint      = var.splunk_hec_endpoint
     hec_token         = var.splunk_hec_token

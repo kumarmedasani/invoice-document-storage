@@ -180,6 +180,37 @@ resource "aws_iam_role" "sftp_user" {
   tags = var.tags
 }
 
+# -----------------------------------------------------------------------------
+# SFTP Users (created from var.sftp_users map)
+# Each user gets a home directory scoped to the landing bucket.
+# -----------------------------------------------------------------------------
+resource "aws_transfer_user" "vendor" {
+  for_each = var.sftp_users
+
+  server_id = aws_transfer_server.sftp.id
+  user_name = each.key
+  role      = aws_iam_role.sftp_user.arn
+
+  home_directory_type = "LOGICAL"
+
+  home_directory_mappings {
+    entry  = "/"
+    target = "/${aws_s3_bucket.landing.id}"
+  }
+
+  tags = merge(var.tags, {
+    Name = "invoice-sftp-user-${each.key}-${var.env}"
+  })
+}
+
+resource "aws_transfer_ssh_key" "vendor" {
+  for_each = var.sftp_users
+
+  server_id = aws_transfer_server.sftp.id
+  user_name = aws_transfer_user.vendor[each.key].user_name
+  body      = each.value
+}
+
 resource "aws_iam_role_policy" "sftp_user" {
   name = "invoice-sftp-user-s3-${var.env}"
   role = aws_iam_role.sftp_user.id

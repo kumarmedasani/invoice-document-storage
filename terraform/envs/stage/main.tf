@@ -18,11 +18,12 @@ locals {
 module "networking" {
   source = "../../modules/networking"
 
-  env        = var.env
-  vpc_cidr   = var.vpc_cidr
-  az_count   = var.az_count
-  aws_region = var.aws_region
-  tags       = local.common_tags
+  env         = var.env
+  vpc_cidr    = var.vpc_cidr
+  az_count    = var.az_count
+  aws_region  = var.aws_region
+  kms_key_arn = module.kms.key_arn
+  tags        = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -141,5 +142,6 @@ module "lambda_ingestion" {
   db_endpoint                    = module.aurora_postgres.writer_endpoint
   kms_key_arn                    = module.kms.key_arn
   log_group_name                 = module.monitoring.log_group_application
+  alert_sns_topic_arn            = module.monitoring.sns_topic_arn
   tags                           = local.common_tags
 }

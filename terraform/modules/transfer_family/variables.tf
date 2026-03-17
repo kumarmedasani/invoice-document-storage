@@ -19,6 +19,12 @@ variable "notification_sns_topic_arn" {
   default     = ""
 }
 
+variable "sftp_users" {
+  description = "Map of SFTP user names to their SSH public keys. Each user gets home directory scoped to the landing bucket."
+  type        = map(string)
+  default     = {}
+}
+
 variable "tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)

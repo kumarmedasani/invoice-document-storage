@@ -53,6 +53,11 @@ variable "log_group_name" {
   type        = string
 }
 
+variable "alert_sns_topic_arn" {
+  description = "ARN of the SNS alerts topic for Lambda error/throttle alarms"
+  type        = string
+}
+
 variable "memory_size" {
   description = "Lambda memory in MB"
   type        = number
