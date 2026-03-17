@@ -6,6 +6,7 @@ This document describes the system architecture for the Invoice Document Storage
 
 - [System Overview](#system-overview)
 - [Component Reference](#component-reference)
+- [End-to-End Component Flow](#end-to-end-component-flow)
 - [Environment Topology](#environment-topology)
 - [Module Dependency Graph](#module-dependency-graph)
 - [Ingestion Data Flow](#ingestion-data-flow)
@@ -234,6 +235,106 @@ The platform uses 6 VPC endpoints to provide private connectivity to AWS service
 | **Why it's needed** | The operations team uses Splunk as their central SIEM and log analytics platform. CloudWatch Logs subscription filters stream all log events to Firehose, which buffers and delivers them to the Splunk HTTP Event Collector (HEC). Firehose was chosen over direct Lambda-based delivery because: (1) It handles buffering, retry, and backpressure automatically. (2) It provides a built-in S3 backup for failed deliveries. (3) It does not require managing a custom Lambda function for log forwarding |
 | **Backup** | Failed deliveries are written to `invoice-firehose-backup-{env}` S3 bucket (GZIP, 14-day expiry) |
 | **Optional** | Disabled by default — set `splunk_hec_endpoint` to enable |
+
+## End-to-End Component Flow
+
+This section traces every component, IAM role, and VPC endpoint involved in each workflow, in the order they are invoked.
+
+### Flow 1: Vendor File Ingestion (SFTP Upload → Document Stored)
+
+1. **Vendor uploads file via SFTP** (ZIP or PDF) to the AWS Transfer Family SFTP server (public endpoint, port 22, SSH key auth)
+2. **AWS Transfer Family** authenticates using its SERVICE_MANAGED identity provider and assumes **IAM role `invoice-sftp-user-{env}`** (trusted by `transfer.amazonaws.com`) — this role grants `s3:PutObject` on the landing bucket and `kms:GenerateDataKey`/`kms:Encrypt` for SSE-KMS
+3. **Transfer Family writes the file** to `invoice-landing-{env}` S3 bucket, encrypted with **KMS key `alias/invoice-{env}`** via SSE-KMS
+4. **Transfer Family logs the upload** to CloudWatch Logs using **IAM role `invoice-sftp-logging-{env}`** (trusted by `transfer.amazonaws.com`) — grants `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
+5. **S3 landing bucket fires `s3:ObjectCreated:*` event** → publishes to **SNS topic `invoice-file-notifications-{env}`**
+6. **SNS fan-out delivers two notifications simultaneously:**
+   - **6a.** → **Ingestion Lambda** (subscribed to the topic) — triggers the processing function
+   - **6b.** → **External Email System** (subscribed via HTTPS/SQS/Lambda) — triggers customer notification email
+7. **Lambda cold start**: Lambda assumes **IAM role `invoice-ingestion-lambda-{env}`** (trusted by `lambda.amazonaws.com`). The runtime calls **STS** via the **STS VPC Endpoint** to obtain temporary credentials
+8. **Lambda retrieves database credentials** from **Secrets Manager** via the **Secrets Manager VPC Endpoint** — the role grants `secretsmanager:GetSecretValue` on the Aurora master secret ARN. The secret is decrypted using **KMS** via the **KMS VPC Endpoint**
+9. **Lambda downloads the file** from `invoice-landing-{env}` via the **S3 Gateway VPC Endpoint** — the role grants `s3:GetObject` and `s3:GetObjectVersion` on the landing bucket. KMS decryption uses the **KMS VPC Endpoint**
+10. **Lambda processes the file:**
+    - If ZIP: extracts individual PDFs in `/tmp`
+    - If PDF: uses file as-is
+11. **Lambda writes each document** to `invoice-docs-{env}` via the **S3 Gateway VPC Endpoint** with the key convention `{source_system}/{year}/{month}/{account_id}/{uuid}.pdf` — the role grants `s3:PutObject` and `s3:GetObject` on the documents bucket. SSE-KMS encryption calls **KMS** (`kms:GenerateDataKey`) via the **KMS VPC Endpoint**
+12. **Lambda connects to Aurora PostgreSQL** via **RDS Proxy** (Stage/Prod) or directly (QA):
+    - Connection goes through **security group `sg-app`** (egress port 5432) → **security group `sg-aurora`** (ingress port 5432 from sg-app only)
+    - RDS Proxy uses **IAM role `invoice-rds-proxy-{env}`** (trusted by `rds.amazonaws.com`) to read credentials from Secrets Manager
+    - Connection is TLS-encrypted (`require_tls = true` on proxy, `rds.force_ssl = 1` on Aurora)
+13. **Lambda executes SQL** within a transaction:
+    - `INSERT INTO invoice_docs.documents (...)` — partitioned by `received_date`
+    - `INSERT INTO invoice_docs.invoice_details (...)` or `invoice_docs.collection_letter_details (...)`
+    - `COMMIT`
+14. **Lambda deletes the processed file** from `invoice-landing-{env}` via the **S3 Gateway VPC Endpoint** — the role grants `s3:DeleteObject` on the landing bucket only (no delete on documents bucket)
+15. **Lambda writes structured JSON log** to CloudWatch Log Group `/invoice/application/{env}` via the **CloudWatch Logs VPC Endpoint** — the role grants `logs:CreateLogStream` and `logs:PutLogEvents`
+
+### Flow 2: Document Retrieval (Query → PDF Download)
+
+1. **Application connects to Aurora** via **RDS Proxy** (Stage/Prod) or directly (QA), through `sg-app` → `sg-aurora` security groups, TLS-encrypted
+2. **Application queries metadata:**
+   ```sql
+   SELECT s3_key, s3_bucket FROM invoice_docs.documents
+   WHERE account_id = ? AND received_date BETWEEN ? AND ?;
+   ```
+   Aurora uses partition pruning on `received_date` to scan only relevant yearly partitions
+3. **Application downloads document** from S3 via the **S3 Gateway VPC Endpoint** using the `s3_key` from the query result
+4. **S3 decrypts the object** using **KMS** (`kms:Decrypt` via the **KMS VPC Endpoint**) — S3 Bucket Keys cache the data key locally, reducing KMS API calls by ~99%
+5. **If document is in Glacier/Deep Archive**, the application must first issue a restore request (`s3:RestoreObject`) and wait 3-48 hours before the PDF is downloadable (see [OPERATIONS.md](OPERATIONS.md) runbooks 2-3)
+
+### Flow 3: Observability (Logs → Splunk)
+
+1. **CloudWatch Logs receives log events** from four sources:
+   - `/invoice/application/{env}` — Lambda ingestion logs (via **CloudWatch Logs VPC Endpoint**)
+   - `/invoice/aurora/{env}` — Aurora PostgreSQL logs (connections, disconnections, slow queries)
+   - `/invoice/migration/{env}` — ETL migration logs
+   - `/aws/vpc/invoice-vpc-{env}/flow-logs` — VPC Flow Logs (written by **IAM role `invoice-vpc-flow-logs-{env}`**, trusted by `vpc-flow-logs.amazonaws.com`)
+2. **Subscription filters** (one per log group) forward log events to Kinesis Data Firehose, using **IAM role `invoice-cwlogs-to-firehose-{env}`** (trusted by `logs.amazonaws.com`) — grants `firehose:PutRecord` and `firehose:PutRecordBatch`
+3. **Kinesis Data Firehose** (`invoice-logs-to-splunk-{env}`) buffers log events (5 MB or 60 seconds) and delivers to **Splunk HEC** using the per-environment HEC token. Firehose uses **IAM role `invoice-firehose-splunk-{env}`** (trusted by `firehose.amazonaws.com`) — grants `s3:PutObject` on the backup bucket and `kms:Decrypt`/`kms:GenerateDataKey` for encryption
+4. **Splunk** receives logs and routes them to the environment-specific index (`invoice_qa`, `invoice_stage`, `invoice_prod`) based on the HEC token
+5. **Failed deliveries** are written to `invoice-firehose-backup-{env}` S3 bucket (GZIP compressed, 14-day lifecycle expiry)
+
+### Flow 4: Infrastructure Alerting
+
+1. **CloudWatch evaluates 6 alarm metrics** every 5 minutes:
+   - Aurora: CPU > 80%, free storage < 20 GB, connections > 80% of max, replica lag > 10s
+   - S3: 5xx errors > 5
+   - KMS: throttle count > 10
+2. **Alarm state changes** (ALARM or OK) publish to **SNS topic `invoice-alerts-{env}`** (KMS-encrypted)
+3. **SNS delivers email notification** to the configured `alert_email` address
+4. **CloudWatch Dashboard** (`invoice-{env}`) provides visual monitoring with 6 widgets (CPU, connections, replica lag, S3 errors, KMS throttles, free storage)
+
+### Flow 5: Legacy Migration (One-Time)
+
+1. **AWS DataSync** transfers PDFs from the on-premises Windows file share to `invoice-docs-{env}` via the SFTP endpoint, using **IAM role `invoice-migration-{env}`** (trusted by `datasync.amazonaws.com` and root account) — grants `s3:PutObject`, `s3:GetObject`, `s3:ListBucket` on documents bucket and KMS permissions
+2. **Python ETL** (`migration/metadata_etl.py`) connects to legacy SQL Server, extracts metadata, transforms it, and loads into Aurora PostgreSQL
+   - Uses `--source` flag (any source system name) and `--table-pattern` for flexible mapping
+   - Logs to CloudWatch Log Group `/invoice/migration/{env}`
+3. **Validation queries** (`database/migration_helpers.sql`) verify row counts, null checks, and S3 key integrity
+
+### IAM Roles Summary
+
+| Role | Trust Principal | Used In |
+|---|---|---|
+| `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | Flow 1 (steps 7-15) |
+| `invoice-sftp-user-{env}` | `transfer.amazonaws.com` | Flow 1 (step 2) |
+| `invoice-sftp-logging-{env}` | `transfer.amazonaws.com` | Flow 1 (step 4) |
+| `invoice-rds-proxy-{env}` | `rds.amazonaws.com` | Flow 1 (step 12), Flow 2 (step 1) |
+| `invoice-aurora-monitoring-{env}` | `monitoring.rds.amazonaws.com` | Enhanced Monitoring (continuous) |
+| `invoice-vpc-flow-logs-{env}` | `vpc-flow-logs.amazonaws.com` | Flow 3 (step 1) |
+| `invoice-cwlogs-to-firehose-{env}` | `logs.amazonaws.com` | Flow 3 (step 2) |
+| `invoice-firehose-splunk-{env}` | `firehose.amazonaws.com` | Flow 3 (step 3) |
+| `invoice-migration-{env}` | `datasync.amazonaws.com`, root | Flow 5 (step 1) |
+
+### VPC Endpoints Summary
+
+| Endpoint | Type | Used In |
+|---|---|---|
+| **S3 Gateway** | Gateway (free) | Flow 1 (steps 9, 11, 14), Flow 2 (step 3) |
+| **Secrets Manager** | Interface | Flow 1 (step 8) |
+| **KMS** | Interface | Flow 1 (steps 8, 9, 11), Flow 2 (step 4) |
+| **CloudWatch Logs** | Interface | Flow 1 (step 15), Flow 3 (step 1) |
+| **CloudWatch Monitoring** | Interface | Flow 4 (step 1) |
+| **STS** | Interface | Flow 1 (step 7) |
 
 Each environment (QA, Stage, Prod) follows the same topology with differences in scale (AZ count, instance sizes).
 
