@@ -220,16 +220,16 @@ The platform uses 6 VPC endpoints to provide private connectivity to AWS service
 
 | Attribute | Details |
 |---|---|
-| **What it is** | AWS-managed log aggregation service receiving logs from Lambda, Aurora, Migration ETL, and VPC Flow Logs |
-| **Why it's needed** | Provides the primary log store for all application and infrastructure logs. Four log groups capture different concerns: (1) `/invoice/application/{env}` — ingestion Lambda execution logs (structured JSON). (2) `/invoice/aurora/{env}` — PostgreSQL connection, disconnection, and slow query logs. (3) `/invoice/migration/{env}` — ETL and DataSync migration logs. (4) `/aws/vpc/invoice-vpc-{env}/flow-logs` — network traffic metadata. All log groups (except VPC Flow Logs) are KMS-encrypted |
+| **What it is** | AWS-managed log aggregation service receiving logs from Lambda, Aurora, Migration ETL, SFTP, and VPC Flow Logs |
+| **Why it's needed** | Provides the primary log store for all application and infrastructure logs. Five log groups capture different concerns: (1) `/invoice/application/{env}` — ingestion Lambda execution logs (structured JSON). (2) `/invoice/aurora/{env}` — PostgreSQL connection, disconnection, and slow query logs. (3) `/invoice/migration/{env}` — ETL and DataSync migration logs. (4) `/invoice/sftp/{env}` — Transfer Family SFTP server structured logs. (5) `/aws/vpc/invoice-vpc-{env}/flow-logs` — network traffic metadata. All log groups are KMS-encrypted |
 | **Retention** | QA/Stage: 90 days, Prod: 365 days |
 
 #### SNS Alerts Topic (`invoice-alerts-{env}`)
 
 | Attribute | Details |
 |---|---|
-| **What it is** | SNS topic for infrastructure alarms and S3 document events |
-| **Why it's needed** | CloudWatch alarms (CPU, storage, connections, replica lag, S3 5xx errors, KMS throttles) publish state changes (ALARM/OK) to this topic, which forwards to the configured alert email. This provides immediate notification of infrastructure issues without requiring someone to watch a dashboard. Kept separate from the file notifications topic to avoid alert fatigue from mixing infrastructure alarms with high-volume file events |
+| **What it is** | SNS topic for infrastructure alarms |
+| **Why it's needed** | CloudWatch alarms (Aurora CPU/storage/connections/replica-lag, S3 5xx errors, KMS throttles, Lambda errors/throttles, DLQ depth) publish state changes (ALARM/OK) to this topic, which forwards to the configured alert email. This provides immediate notification of infrastructure issues without requiring someone to watch a dashboard. Kept separate from the file notifications topic to avoid alert fatigue from mixing infrastructure alarms with high-volume file events |
 | **Subscribers** | Alert email address |
 | **Encryption** | KMS-encrypted with the environment key |
 
@@ -251,7 +251,7 @@ This section traces every component, IAM role, and VPC endpoint involved in each
 1. **Vendor uploads file via SFTP** (ZIP or PDF) to the AWS Transfer Family SFTP server (public endpoint, port 22, SSH key auth)
 2. **AWS Transfer Family** authenticates using its SERVICE_MANAGED identity provider and assumes **IAM role `invoice-sftp-user-{env}`** (trusted by `transfer.amazonaws.com`) — this role grants `s3:PutObject` on the landing bucket and `kms:GenerateDataKey`/`kms:Encrypt` for SSE-KMS
 3. **Transfer Family writes the file** to `invoice-landing-{env}` S3 bucket, encrypted with **KMS key `alias/invoice-{env}`** via SSE-KMS
-4. **Transfer Family logs the upload** to CloudWatch Logs using **IAM role `invoice-sftp-logging-{env}`** (trusted by `transfer.amazonaws.com`) — grants `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`
+4. **Transfer Family logs the upload** to CloudWatch Log Group `/invoice/sftp/{env}` using **IAM role `invoice-sftp-logging-{env}`** (trusted by `transfer.amazonaws.com`) — grants `logs:CreateLogStream`, `logs:PutLogEvents`
 5. **S3 landing bucket fires `s3:ObjectCreated:*` event** → publishes to **SNS topic `invoice-file-notifications-{env}`**
 6. **SNS fan-out delivers two notifications simultaneously:**
    - **6a.** → **Ingestion Lambda** (subscribed to the topic) — triggers the processing function
@@ -842,14 +842,17 @@ The KMS key policy follows the **root admin delegation** pattern:
 | `aurora-replica-lag-high-{env}` | AuroraReplicaLag | > 10,000 ms | 5 min |
 | `s3-5xx-errors-{env}` | 5xxErrors | > 5 per period | 5 min |
 | `kms-throttles-{env}` | ThrottleCount | > 10 per period | 5 min |
+| `lambda-errors-{env}` | Lambda Errors | > 0 | 5 min |
+| `lambda-throttles-{env}` | Lambda Throttles | > 0 | 5 min |
+| `dlq-messages-{env}` | SQS ApproximateNumberOfMessagesVisible | > 0 | 5 min |
 
-All alarms send notifications to the `invoice-alerts-{env}` SNS topic, which forwards to the configured email address. Both ALARM and OK transitions are notified.
+All alarms send notifications to the `invoice-alerts-{env}` SNS topic, which forwards to the configured email address. Both ALARM and OK transitions are notified. Lambda alarms are defined in the `lambda_ingestion` module alongside the DLQ.
 
 ### SNS Topics
 
 | Topic | Purpose | Subscribers |
 |---|---|---|
-| `invoice-alerts-{env}` | Infrastructure alarms, S3 document events | Alert email |
+| `invoice-alerts-{env}` | Infrastructure and Lambda alarms | Alert email |
 | `invoice-file-notifications-{env}` | Landing zone file drop events (S3 ObjectCreated) | Ingestion Lambda, external email system |
 
 The file notification topic is separate from alerts to avoid mixing infrastructure alarms with file ingestion events. External systems subscribe to `invoice-file-notifications-{env}` to trigger customer email notifications when vendors drop files.
@@ -866,7 +869,7 @@ CloudWatch Logs → Subscription Filter → Kinesis Firehose → Splunk HEC
 |---|---|
 | Delivery stream | `invoice-logs-to-splunk-{env}` |
 | Destination | Splunk HTTP Event Collector (HEC) |
-| Log groups streamed | Application, Aurora, Migration, VPC Flow Logs (4 subscription filters) |
+| Log groups streamed | Application, Aurora, Migration, SFTP, VPC Flow Logs (5 subscription filters) |
 | Splunk index routing | Configured via per-environment HEC token on the Splunk side |
 | Failed delivery backup | `invoice-firehose-backup-{env}` S3 bucket (14-day expiry, GZIP) |
 | IAM roles | `invoice-firehose-splunk-{env}` (Firehose → S3 backup), `invoice-cwlogs-to-firehose-{env}` (CW Logs → Firehose) |
@@ -899,4 +902,5 @@ The `invoice-{env}` dashboard provides 6 widgets:
 | `/invoice/application/{env}` | Ingestion service logs | 90d (QA/Stage), 365d (Prod) | Yes (KMS) |
 | `/invoice/aurora/{env}` | Aurora PostgreSQL logs | 90d (QA/Stage), 365d (Prod) | Yes (KMS) |
 | `/invoice/migration/{env}` | ETL and DataSync logs | 90d (QA/Stage), 365d (Prod) | Yes (KMS) |
-| `/aws/vpc/invoice-vpc-{env}/flow-logs` | VPC Flow Logs | 90 days | No |
+| `/invoice/sftp/{env}` | Transfer Family SFTP logs | 90d (QA/Stage), 365d (Prod) | Yes (KMS) |
+| `/aws/vpc/invoice-vpc-{env}/flow-logs` | VPC Flow Logs | 90 days | Yes (KMS) |

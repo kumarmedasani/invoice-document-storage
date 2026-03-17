@@ -50,7 +50,7 @@ A single symmetric KMS key per environment encrypts all data at rest:
 | S3 Documents | SSE-KMS with S3 Bucket Keys | `alias/invoice-{env}` |
 | Aurora PostgreSQL | Storage-level encryption | `alias/invoice-{env}` |
 | Secrets Manager (Aurora credentials) | Envelope encryption | `alias/invoice-{env}` |
-| CloudWatch Log Groups (3) | Log group encryption | `alias/invoice-{env}` |
+| CloudWatch Log Groups (4) | Log group encryption | `alias/invoice-{env}` |
 | VPC Flow Logs Log Group | Log group encryption | `alias/invoice-{env}` |
 | Lambda DLQ (SQS) | Queue encryption | `alias/invoice-{env}` |
 | Performance Insights (Stage/Prod) | PI data encryption | `alias/invoice-{env}` |
@@ -176,7 +176,7 @@ All VPC traffic (ACCEPT and REJECT) is logged to CloudWatch Logs:
 | Role | Trust Principal | Permissions |
 |---|---|---|
 | `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | S3 (documents + landing), KMS, Secrets Manager, CloudWatch Logs, `AWSLambdaVPCAccessExecutionRole` (ENI management for VPC attachment) |
-| `invoice-sftp-logging-{env}` | `transfer.amazonaws.com` | CloudWatch Logs (Transfer Family structured logging) |
+| `invoice-sftp-logging-{env}` | `transfer.amazonaws.com` | CloudWatch Logs write to dedicated SFTP log group (`/invoice/sftp/{env}`) |
 | `invoice-sftp-user-{env}` | `transfer.amazonaws.com` | S3 PutObject on landing bucket, KMS encrypt |
 | `invoice-migration-{env}` | `datasync.amazonaws.com`, root account | S3, KMS |
 | `invoice-aurora-monitoring-{env}` | `monitoring.rds.amazonaws.com` | Enhanced Monitoring |
@@ -233,6 +233,7 @@ Aurora uses `manage_master_user_password = true`, which:
 | Ingestion service | `/invoice/application/{env}` | Structured JSON |
 | Aurora PostgreSQL | `/invoice/aurora/{env}` | PostgreSQL log format |
 | Migration ETL | `/invoice/migration/{env}` | Structured JSON |
+| Transfer Family SFTP | `/invoice/sftp/{env}` | Transfer Family structured logging |
 | VPC traffic | `/aws/vpc/invoice-vpc-{env}/flow-logs` | VPC Flow Log format |
 
 ### Splunk Log Streaming

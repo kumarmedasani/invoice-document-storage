@@ -79,7 +79,7 @@ jobs:
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           working_directory: terraform/
-          soft_fail: true
+          soft_fail: false
 
   plan:
     name: "Plan: ${{ matrix.environment }}"
@@ -105,7 +105,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: terraform/envs/${{ matrix.environment }}
-        run: terraform init
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
       - name: Terraform Validate
         working-directory: terraform/envs/${{ matrix.environment }}
@@ -155,16 +155,14 @@ jobs:
           path: terraform/envs/${{ matrix.environment }}/${{ matrix.environment }}.tfplan
           retention-days: 5
 
-  apply:
-    name: "Apply: ${{ matrix.environment }}"
+  apply-qa:
+    name: "Apply: qa"
     needs: [detect-environment, plan]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      contains(fromJson(needs.detect-environment.outputs.environments), 'qa')
     runs-on: ubuntu-latest
-    environment: ${{ matrix.environment }}
-    strategy:
-      matrix:
-        environment: ${{ fromJson(needs.detect-environment.outputs.environments) }}
-      max-parallel: 1
+    environment: qa
     steps:
       - uses: actions/checkout@v4
 
@@ -175,19 +173,93 @@ jobs:
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets[format('AWS_ROLE_ARN_{0}', matrix.environment)] }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_qa }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
-        working-directory: terraform/envs/${{ matrix.environment }}
-        run: terraform init
+        working-directory: terraform/envs/qa
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
-          name: tfplan-${{ matrix.environment }}
-          path: terraform/envs/${{ matrix.environment }}
+          name: tfplan-qa
+          path: terraform/envs/qa
 
       - name: Terraform Apply (saved plan)
-        working-directory: terraform/envs/${{ matrix.environment }}
-        run: terraform apply ${{ matrix.environment }}.tfplan
+        working-directory: terraform/envs/qa
+        run: terraform apply qa.tfplan
+
+  apply-stage:
+    name: "Apply: stage"
+    needs: [detect-environment, plan, apply-qa]
+    if: >-
+      always() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      contains(fromJson(needs.detect-environment.outputs.environments), 'stage') &&
+      (needs.apply-qa.result == 'success' || needs.apply-qa.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: stage
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_stage }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: terraform/envs/stage
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-stage
+          path: terraform/envs/stage
+
+      - name: Terraform Apply (saved plan)
+        working-directory: terraform/envs/stage
+        run: terraform apply stage.tfplan
+
+  apply-prod:
+    name: "Apply: prod"
+    needs: [detect-environment, plan, apply-stage]
+    if: >-
+      always() &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      contains(fromJson(needs.detect-environment.outputs.environments), 'prod') &&
+      (needs.apply-stage.result == 'success' || needs.apply-stage.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_prod }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        working-directory: terraform/envs/prod
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-prod
+          path: terraform/envs/prod
+
+      - name: Terraform Apply (saved plan)
+        working-directory: terraform/envs/prod
+        run: terraform apply prod.tfplan

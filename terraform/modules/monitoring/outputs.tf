@@ -18,6 +18,16 @@ output "log_group_aurora" {
   value       = aws_cloudwatch_log_group.aurora.name
 }
 
+output "log_group_sftp" {
+  description = "CloudWatch log group name for SFTP"
+  value       = aws_cloudwatch_log_group.sftp.name
+}
+
+output "log_group_sftp_arn" {
+  description = "CloudWatch log group ARN for SFTP"
+  value       = aws_cloudwatch_log_group.sftp.arn
+}
+
 output "dashboard_name" {
   description = "CloudWatch dashboard name"
   value       = aws_cloudwatch_dashboard.main.dashboard_name

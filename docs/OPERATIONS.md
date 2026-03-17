@@ -749,8 +749,7 @@ aws iam simulate-principal-policy \
 
 ```bash
 aws logs filter-log-events \
-  --log-group-name "/invoice/application/$ENV" \
-  --filter-pattern '"transfer.amazonaws.com"' \
+  --log-group-name "/invoice/sftp/$ENV" \
   --start-time $(date -d '1 hour ago' +%s000) \
   --query 'events[*].message' --output text
 ```
@@ -852,7 +851,7 @@ Expected status: `ACTIVE`.
 2. **Check subscription filters:**
 
 ```bash
-for LOG_GROUP in "/invoice/application/$ENV" "/invoice/aurora/$ENV" "/invoice/migration/$ENV" "/aws/vpc/invoice-vpc-$ENV/flow-logs"; do
+for LOG_GROUP in "/invoice/application/$ENV" "/invoice/aurora/$ENV" "/invoice/migration/$ENV" "/invoice/sftp/$ENV" "/aws/vpc/invoice-vpc-$ENV/flow-logs"; do
   echo "=== $LOG_GROUP ==="
   aws logs describe-subscription-filters \
     --log-group-name "$LOG_GROUP" \

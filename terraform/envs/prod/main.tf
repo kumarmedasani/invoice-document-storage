@@ -102,7 +102,7 @@ module "transfer_family" {
 
   env                        = var.env
   kms_key_arn                = module.kms.key_arn
-  log_group_arn              = module.monitoring.log_group_application_arn
+  log_group_arn              = module.monitoring.log_group_sftp_arn
   notification_sns_topic_arn = module.monitoring.file_notification_sns_topic_arn
   tags                       = local.common_tags
 }

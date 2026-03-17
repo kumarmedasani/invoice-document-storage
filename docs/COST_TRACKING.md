@@ -28,7 +28,8 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | S3 Access Logging Bucket | ~$1 | ~$1 | ~$2 | Minimal storage, 90-day expiry |
 | KMS | ~$1 | ~$1 | ~$1 | $1/key/month + API calls |
 | CloudWatch Logs | ~$3 | ~$5 | ~$10 | Ingestion + storage |
-| CloudWatch Alarms | ~$1 | ~$1 | ~$1 | $0.10/alarm/month |
+| CloudWatch Alarms (9) | ~$1 | ~$1 | ~$1 | $0.10/alarm/month |
+| SQS (Lambda DLQ) | < $1 | < $1 | < $1 | Free tier covers most; pay-per-message |
 | CloudWatch Dashboard | ~$3 | ~$3 | ~$3 | $3/dashboard/month |
 | VPC Endpoints (5 Interface) | ~$19 | ~$19 | ~$28 | $0.01/hour/AZ + data |
 | AWS Transfer Family (SFTP) | ~$22 | ~$22 | ~$22 | $0.30/hour for SFTP server |

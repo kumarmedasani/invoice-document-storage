@@ -7,6 +7,7 @@ locals {
     application = aws_cloudwatch_log_group.application.name
     aurora      = aws_cloudwatch_log_group.aurora.name
     migration   = aws_cloudwatch_log_group.migration.name
+    sftp        = aws_cloudwatch_log_group.sftp.name
   }
 }
 
@@ -40,6 +41,16 @@ resource "aws_cloudwatch_log_group" "migration" {
 
   tags = merge(var.tags, {
     Name = "invoice-log-migration-${var.env}"
+  })
+}
+
+resource "aws_cloudwatch_log_group" "sftp" {
+  name              = "/invoice/sftp/${var.env}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "invoice-log-sftp-${var.env}"
   })
 }
 
