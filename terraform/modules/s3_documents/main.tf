@@ -183,7 +183,8 @@ resource "aws_s3_bucket_notification" "documents" {
   bucket = aws_s3_bucket.documents.id
 
   topic {
-    topic_arn = var.notification_sns_topic_arn
-    events    = ["s3:ObjectCreated:*"]
+    topic_arn     = var.notification_sns_topic_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "vendor-uploads/"
   }
 }
