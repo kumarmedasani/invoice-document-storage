@@ -23,17 +23,6 @@ variable "az_count" {
   type        = number
 }
 
-variable "enable_nat_gateway" {
-  description = "Whether to enable NAT Gateway"
-  type        = bool
-}
-
-variable "single_nat_gateway" {
-  description = "Use a single NAT Gateway instead of one per AZ"
-  type        = bool
-  default     = false
-}
-
 variable "aurora_instance_class" {
   description = "Aurora instance class"
   type        = string
@@ -95,8 +84,16 @@ variable "cost_center" {
   type        = string
 }
 
-variable "ingestion_runtime" {
-  description = "Primary ingestion runtime (lambda or ecs)"
+variable "splunk_hec_endpoint" {
+  description = "Splunk HEC endpoint URL (empty string to disable Splunk log streaming)"
   type        = string
-  default     = "lambda"
+  default     = ""
 }
+
+variable "splunk_hec_token" {
+  description = "Splunk HEC token (each env uses a different token mapped to its Splunk index)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+

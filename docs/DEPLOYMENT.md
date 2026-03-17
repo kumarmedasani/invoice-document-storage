@@ -37,13 +37,15 @@ The deploying principal (user or CI/CD role) requires the following permissions.
 |---|---|---|
 | S3 | `s3:*` | `invoice-tfstate-*`, `invoice-docs-*` |
 | DynamoDB | `dynamodb:*` | `invoice-tfstate-lock` |
-| EC2 | `ec2:*` | VPC, subnets, security groups, endpoints, NAT gateways, EIPs, flow logs |
+| EC2 | `ec2:*` | VPC, subnets, security groups, endpoints, flow logs |
+| Transfer Family | `transfer:*` | SFTP server, users, IAM roles |
 | KMS | `kms:*` | Key creation, alias management, policy updates |
 | RDS | `rds:*` | Aurora cluster, instances, parameter groups, proxy |
 | IAM | `iam:*` | Role and policy management |
 | SNS | `sns:*` | Topic creation, subscriptions |
 | CloudWatch | `cloudwatch:*` | Alarms, dashboards |
-| CloudWatch Logs | `logs:*` | Log group creation, encryption |
+| CloudWatch Logs | `logs:*` | Log group creation, encryption, subscription filters |
+| Firehose | `firehose:*` | Delivery stream creation (Splunk streaming) |
 | Secrets Manager | `secretsmanager:GetSecretValue` | RDS Proxy configuration, credential retrieval |
 | STS | `sts:GetCallerIdentity` | Account ID resolution |
 
@@ -56,6 +58,8 @@ The deploying principal (user or CI/CD role) requires the following permissions.
   - `aws_account_id` — Your 12-digit AWS account ID
   - `alert_email` — Email for CloudWatch alarm notifications
   - `cost_center` — Your organization's cost center identifier
+  - `splunk_hec_endpoint` — Splunk HEC endpoint URL (empty string to skip Splunk)
+  - `splunk_hec_token` — Splunk HEC token per environment (routes to env-specific index)
 - [ ] Network connectivity to AWS APIs (or VPN if required)
 
 ## Deployment Order
@@ -251,7 +255,7 @@ Before applying to production, verify the plan output shows:
 - [ ] No changes to S3 bucket settings that could affect Object Lock
 - [ ] Security group changes do not break existing connectivity
 - [ ] Aurora changes do not trigger an engine restart or failover
-- [ ] NAT Gateway changes maintain HA (3 gateways, one per AZ)
+- [ ] VPC endpoint changes do not disrupt service connectivity
 
 ```bash
 # Apply only after thorough review
@@ -272,15 +276,34 @@ aws ec2 describe-subnets \
 aws s3api get-object-lock-configuration \
   --bucket invoice-docs-prod
 
-# Verify 3 NAT Gateways
-aws ec2 describe-nat-gateways \
-  --filter "Name=tag:Name,Values=invoice-nat-prod-*" \
-  --query 'NatGateways[*].{State:State,AZ:SubnetId}'
+# Verify SFTP server is running
+aws transfer describe-server \
+  --server-id $(terraform output -raw sftp_server_id) \
+  --query '{State:State,Endpoint:EndpointDetails}'
+
+# Verify landing zone bucket exists
+aws s3api head-bucket --bucket invoice-landing-prod
+
+# Verify VPC endpoints (6 total: S3 Gateway + 5 Interface)
+aws ec2 describe-vpc-endpoints \
+  --filters "Name=tag:Name,Values=invoice-*-endpoint-prod" \
+  --query 'VpcEndpoints[*].{Name:Tags[?Key==`Name`].Value|[0],State:State,Type:VpcEndpointType}'
 
 # Verify backup retention is 35 days
 aws rds describe-db-clusters \
   --db-cluster-identifier invoice-aurora-prod \
   --query 'DBClusters[0].BackupRetentionPeriod'
+
+# Verify Firehose delivery stream (if Splunk enabled)
+aws firehose describe-delivery-stream \
+  --delivery-stream-name "invoice-logs-to-splunk-prod" \
+  --query 'DeliveryStreamDescription.{Status:DeliveryStreamStatus,Destination:Destinations[0].SplunkDestinationDescription.HECEndpoint}' \
+  2>/dev/null || echo "Splunk streaming not configured"
+
+# Verify file notification SNS topic exists
+aws sns get-topic-attributes \
+  --topic-arn $(terraform output -raw file_notification_sns_topic_arn) \
+  --query 'Attributes.TopicArn'
 ```
 
 ## Post-Deployment Tasks

@@ -1,7 +1,7 @@
 # TODO(registry): extract when team size > 5
 
 # -----------------------------------------------------------------------------
-# Ingestion Policy (shared between Lambda and ECS roles)
+# Ingestion Policy (Lambda)
 # -----------------------------------------------------------------------------
 resource "aws_iam_policy" "ingestion" {
   name        = "invoice-ingestion-policy-${var.env}"
@@ -11,7 +11,7 @@ resource "aws_iam_policy" "ingestion" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3Access"
+        Sid    = "S3DocumentsAccess"
         Effect = "Allow"
         Action = [
           "s3:PutObject",
@@ -21,12 +21,30 @@ resource "aws_iam_policy" "ingestion" {
         Resource = "${var.s3_bucket_arn}/*"
       },
       {
-        Sid    = "S3ListBucket"
+        Sid    = "S3DocumentsListBucket"
         Effect = "Allow"
         Action = [
           "s3:ListBucket"
         ]
         Resource = var.s3_bucket_arn
+      },
+      {
+        Sid    = "S3LandingRead"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:DeleteObject",
+        ]
+        Resource = "${var.landing_bucket_arn}/*"
+      },
+      {
+        Sid    = "S3LandingListBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = var.landing_bucket_arn
       },
       {
         Sid    = "KMSAccess"
@@ -95,35 +113,6 @@ resource "aws_iam_role" "ingestion_lambda" {
 
 resource "aws_iam_role_policy_attachment" "ingestion_lambda" {
   role       = aws_iam_role.ingestion_lambda.name
-  policy_arn = aws_iam_policy.ingestion.arn
-}
-
-# -----------------------------------------------------------------------------
-# ECS Ingestion Role
-# -----------------------------------------------------------------------------
-resource "aws_iam_role" "ingestion_ecs" {
-  name = "invoice-ingestion-ecs-${var.env}"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = merge(var.tags, {
-    Name = "invoice-ingestion-ecs-${var.env}"
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ingestion_ecs" {
-  role       = aws_iam_role.ingestion_ecs.name
   policy_arn = aws_iam_policy.ingestion.arn
 }
 

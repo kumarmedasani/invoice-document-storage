@@ -43,12 +43,27 @@ output "lambda_role_arn" {
   value       = module.iam.lambda_role_arn
 }
 
-output "ecs_role_arn" {
-  description = "ECS ingestion role ARN"
-  value       = module.iam.ecs_role_arn
-}
-
 output "dashboard_name" {
   description = "CloudWatch dashboard name"
   value       = module.monitoring.dashboard_name
+}
+
+output "sftp_server_endpoint" {
+  description = "Transfer Family SFTP server endpoint"
+  value       = module.transfer_family.sftp_server_endpoint
+}
+
+output "landing_bucket_name" {
+  description = "Landing zone S3 bucket name"
+  value       = module.transfer_family.landing_bucket_name
+}
+
+output "file_notification_sns_topic_arn" {
+  description = "SNS topic ARN for file drop notifications (external systems subscribe here)"
+  value       = module.monitoring.file_notification_sns_topic_arn
+}
+
+output "firehose_delivery_stream_name" {
+  description = "Kinesis Firehose delivery stream name for Splunk"
+  value       = module.monitoring.firehose_delivery_stream_name
 }

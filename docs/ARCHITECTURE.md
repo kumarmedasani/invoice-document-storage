@@ -21,55 +21,58 @@ This document describes the system architecture for the Invoice Document Storage
 
 The Invoice Document Storage platform replaces a legacy Windows Server-based system with a cloud-native AWS architecture. Documents (PDFs) are stored in Amazon S3 with metadata in Aurora PostgreSQL. The system serves three primary workloads:
 
-1. **Ingestion** — New documents are uploaded via an ingestion service (Lambda or ECS), which writes the PDF to S3 and metadata to Aurora
+1. **Ingestion** — Vendors drop files (PDFs or ZIPs) via SFTP into a landing zone S3 bucket. A Lambda function extracts ZIPs, writes individual documents to the permanent S3 documents bucket, and inserts metadata into Aurora
 2. **Retrieval** — Documents are queried by account ID, date range, or invoice number, with the PDF fetched from S3
 3. **Migration** — Legacy documents are bulk-migrated from Windows file shares (via DataSync) and SQL Server (via Python ETL)
 
 ## Environment Topology
 
-Each environment (QA, Stage, Prod) follows the same topology with differences in scale (AZ count, NAT gateways, instance sizes).
+Each environment (QA, Stage, Prod) follows the same topology with differences in scale (AZ count, instance sizes).
 
 ```mermaid
 graph TD
-    subgraph VPC["VPC (10.x0.0.0/16)"]
+    Vendors["Vendors (SFTP)"] -->|SFTP Port 22| SFTP["AWS Transfer Family"]
+    SFTP -->|Upload| Landing["S3 Landing Zone<br/>invoice-landing-{env}<br/>(7-day expiry)"]
+    Landing -->|S3 Event| FileSNS["SNS File Notifications"]
+    FileSNS -->|Trigger| Lambda
+    FileSNS -->|Notify| ExtEmail["External Email System"]
+
+    subgraph VPC["VPC (10.x.0.0/16) — No internet egress"]
         subgraph AppSubnets["App Subnets (Private)"]
-            AZa_App["AZ-a: App Subnet<br/>x.x.1.0/24"]
-            AZb_App["AZ-b: App Subnet<br/>x.x.2.0/24"]
-            AZc_App["AZ-c: App Subnet<br/>x.x.3.0/24<br/>(Prod only)"]
-            Lambda["Lambda / ECS<br/>Ingestion Service"]
+            Lambda["Ingestion Lambda"]
         end
         subgraph DataSubnets["Data Subnets (Private, No Internet)"]
-            AZa_Data["AZ-a: Data Subnet<br/>x.x.11.0/24"]
-            AZb_Data["AZ-b: Data Subnet<br/>x.x.12.0/24"]
-            AZc_Data["AZ-c: Data Subnet<br/>x.x.13.0/24<br/>(Prod only)"]
             Aurora["Aurora PostgreSQL 16.2<br/>Cluster (Writer + Reader)"]
             Proxy["RDS Proxy<br/>(Stage/Prod only)"]
         end
         subgraph Endpoints["VPC Endpoints"]
-            S3EP["S3 Gateway Endpoint<br/>(Free, policy-scoped<br/>to invoice-docs-*)"]
-            SMEP["Secrets Manager<br/>Interface Endpoint"]
-            KMSEP["KMS<br/>Interface Endpoint"]
-            CWEP["CloudWatch + Logs<br/>Interface Endpoints"]
-        end
-        subgraph NAT_Subnet["NAT Subnets (Minimal Public)"]
-            NAT["NAT Gateway<br/>Stage: 1 shared<br/>Prod: 1 per AZ"]
+            S3EP["S3 Gateway Endpoint<br/>(Free, policy-scoped to<br/>invoice-docs-* + invoice-landing-*)"]
+            SMEP["Secrets Manager"]
+            KMSEP["KMS"]
+            CWEP["CloudWatch + Logs"]
+            STSEP["STS"]
         end
         FlowLogs["VPC Flow Logs<br/>→ CloudWatch Logs"]
     end
 
+    Lambda -->|"Extract ZIP / Copy PDF"| Docs["S3 Documents<br/>invoice-docs-{env}<br/>(10-year lifecycle)"]
     Lambda --> S3EP
     Lambda --> SMEP
     Lambda --> KMSEP
     Lambda --> Proxy
     Proxy --> Aurora
     Lambda --> CWEP
-    NAT --> IGW["Internet Gateway"]
+
+    subgraph Observability["Log Streaming"]
+        CWLogs["CloudWatch Logs"] -->|Subscription Filters| Firehose["Kinesis Firehose"]
+        Firehose -->|HEC| Splunk["Splunk<br/>(per-env index)"]
+    end
 
     style VPC fill:#f0f8ff,stroke:#4a90d9
     style AppSubnets fill:#e8f5e9,stroke:#66bb6a
     style DataSubnets fill:#fff3e0,stroke:#ffa726
     style Endpoints fill:#f3e5f5,stroke:#ab47bc
-    style NAT_Subnet fill:#fce4ec,stroke:#ef5350
+    style Observability fill:#e0f7fa,stroke:#00838f
 ```
 
 ### Environment Differences
@@ -78,7 +81,7 @@ graph TD
 |---|---|---|---|
 | VPC CIDR | 10.10.0.0/16 | 10.20.0.0/16 | 10.30.0.0/16 |
 | Availability Zones | 2 | 2 | 3 |
-| NAT Gateways | 0 (no internet egress) | 1 (shared across AZs) | 3 (one per AZ for HA) |
+| Internet Egress | None (VPC endpoints only) | None (VPC endpoints only) | None (VPC endpoints only) |
 | Aurora Instances | 1x db.t4g.medium | 2x db.t4g.large | 2x db.r8g.large |
 | RDS Proxy | No | Yes | Yes |
 | S3 Object Lock | No | No | Yes (GOVERNANCE mode, 3650 days) |
@@ -97,9 +100,10 @@ graph LR
     networking["networking<br/>(VPC, Subnets, SGs,<br/>Endpoints, Flow Logs)"]
     kms["kms<br/>(KMS Key, Alias,<br/>Key Policy)"]
     aurora["aurora_postgres<br/>(Cluster, Instances,<br/>RDS Proxy)"]
-    monitoring["monitoring<br/>(Log Groups, SNS,<br/>Alarms, Dashboard)"]
+    monitoring["monitoring<br/>(Log Groups, SNS Topics,<br/>Alarms, Dashboard,<br/>Firehose → Splunk)"]
     s3["s3_documents<br/>(Bucket, Lifecycle,<br/>Object Lock, Logging)"]
-    iam["iam<br/>(Lambda Role, ECS Role,<br/>Migration Role)"]
+    transfer["transfer_family<br/>(SFTP Server, Landing Bucket,<br/>S3 Notification)"]
+    iam["iam<br/>(Lambda Role,<br/>Migration Role)"]
 
     networking --> aurora
     kms --> aurora
@@ -107,7 +111,11 @@ graph LR
     aurora --> monitoring
     kms --> s3
     monitoring -->|sns_topic_arn| s3
+    kms --> transfer
+    monitoring -->|file_notification_sns_topic_arn| transfer
+    monitoring -->|vpc_flow_log_group_name| networking
     s3 --> iam
+    transfer -->|landing_bucket_arn| iam
     kms --> iam
     aurora -->|master_secret_arn| iam
 
@@ -127,38 +135,50 @@ graph LR
 
 ```mermaid
 sequenceDiagram
-    participant Src as Source System
-    participant Svc as Ingestion Service<br/>(Lambda/ECS)
+    participant Vendor as Vendor (SFTP)
+    participant SFTP as AWS Transfer Family
+    participant Landing as S3 Landing Zone<br/>(invoice-landing-{env})
+    participant SNS as SNS File Notifications
+    participant ExtEmail as External Email System
+    participant Lambda as Ingestion Lambda
     participant SM as Secrets Manager<br/>(via VPC Endpoint)
-    participant KMS as KMS<br/>(via VPC Endpoint)
-    participant S3 as S3 Bucket<br/>(via Gateway Endpoint)
-    participant SNS as SNS Topic
+    participant S3 as S3 Documents<br/>(invoice-docs-{env})
     participant DB as Aurora PostgreSQL<br/>(via RDS Proxy)
-    participant CW as CloudWatch Logs<br/>(via VPC Endpoint)
+    participant CW as CloudWatch Logs
 
-    Src->>Svc: Document (PDF) + Metadata
-    Svc->>SM: GetSecretValue (DB credentials)
-    SM-->>Svc: {host, port, username, password}
-    Svc->>KMS: GenerateDataKey (for S3 SSE-KMS)
-    KMS-->>Svc: Plaintext + Encrypted Data Key
-    Svc->>S3: PutObject (SSE-KMS, bucket key)<br/>{source}/{year}/{month}/{account}/{uuid}.pdf
-    S3-->>Svc: {VersionId, ETag}
-    S3->>SNS: s3:ObjectCreated:* notification
-    Svc->>DB: BEGIN
-    Svc->>DB: INSERT INTO documents (...)
-    Svc->>DB: INSERT INTO invoice_details (...) / collection_letter_details (...)
-    Svc->>DB: COMMIT
-    DB-->>Svc: Confirmation
-    Svc->>CW: Structured JSON log entry
-    Svc-->>Src: Success response
+    Vendor->>SFTP: Upload file (ZIP or PDF)
+    SFTP->>Landing: Write to landing bucket
+    Landing->>SNS: s3:ObjectCreated:* notification
+    SNS->>Lambda: Trigger ingestion
+    SNS->>ExtEmail: File drop notification<br/>(for customer email)
+    Lambda->>Landing: GetObject (download file)
+    alt File is ZIP
+        Lambda->>Lambda: Extract ZIP in /tmp
+        loop For each extracted file
+            Lambda->>S3: PutObject (SSE-KMS)<br/>{source}/{year}/{month}/{account}/{uuid}.pdf
+        end
+    else File is PDF
+        Lambda->>S3: PutObject (copy to documents bucket)
+    end
+    Lambda->>SM: GetSecretValue (DB credentials)
+    SM-->>Lambda: {host, port, username, password}
+    Lambda->>DB: BEGIN
+    Lambda->>DB: INSERT INTO documents (...)
+    Lambda->>DB: INSERT INTO invoice_details / collection_letter_details
+    Lambda->>DB: COMMIT
+    Lambda->>Landing: DeleteObject (clean up)
+    Lambda->>CW: Structured JSON log entry
 ```
 
 ### Data Flow Notes
 
-- **All traffic stays within the VPC** — S3 access goes through the Gateway Endpoint (free, no NAT charges), while Secrets Manager, KMS, and CloudWatch use Interface Endpoints
-- **RDS Proxy** (Stage/Prod) pools connections and handles failover transparently. The ingestion service connects to the proxy endpoint; the proxy forwards to the Aurora writer
+- **Two-bucket design** — Vendors upload to a transient landing zone bucket (`invoice-landing-{env}`, 7-day expiry). Lambda extracts ZIPs and writes processed files to the permanent documents bucket (`invoice-docs-{env}`, 10-year lifecycle with Object Lock in Prod)
+- **No internet egress** — All VPC traffic uses VPC endpoints (S3 Gateway, Secrets Manager, KMS, CloudWatch, STS). No NAT Gateway or Internet Gateway exists
+- **RDS Proxy** (Stage/Prod) pools connections and handles failover transparently. The Lambda connects to the proxy endpoint; the proxy forwards to the Aurora writer
 - **S3 Bucket Keys** reduce KMS API calls by ~99% — S3 generates per-object keys locally using a bucket-level key, avoiding a KMS API call per PutObject
 - **Structured JSON logging** via CloudWatch ensures all ingestion events are searchable and parseable
+- **File drop notifications** — When a file lands in the landing zone, the S3 event publishes to a dedicated SNS topic (`invoice-file-notifications-{env}`). Both the Lambda (for processing) and external systems (for customer email) subscribe to this topic
+- **Splunk log streaming** — All CloudWatch log groups are streamed to Splunk via Kinesis Data Firehose subscription filters. Each environment uses a separate Splunk HEC token mapped to its own index
 
 ## Document Retrieval Flow
 
@@ -229,29 +249,29 @@ Production uses S3 Object Lock in **GOVERNANCE mode** with a 3650-day (10-year) 
 
 ### Subnet Layout
 
-Each availability zone has two private subnets:
+Each availability zone has two private subnets. There are no public subnets, no NAT Gateways, and no Internet Gateway — all AWS service access uses VPC endpoints.
 
 | Subnet Tier | CIDR Pattern | Purpose | Internet Access |
 |---|---|---|---|
-| App | x.x.{1,2,3}.0/24 | Lambda/ECS ingestion service | Via NAT Gateway (Stage/Prod) |
+| App | x.x.{1,2,3}.0/24 | Lambda ingestion service | None (VPC endpoints only) |
 | Data | x.x.{11,12,13}.0/24 | Aurora PostgreSQL, RDS Proxy | None (local VPC only) |
-| NAT (minimal) | x.x.{100}.0/28 | NAT Gateway placement | Public (IGW route) |
 
 ### VPC Endpoints
 
 | Endpoint | Type | Purpose | Policy |
 |---|---|---|---|
-| S3 | Gateway (free) | Document storage access | Scoped to `invoice-docs-*` buckets only |
+| S3 | Gateway (free) | Document and landing bucket access | Scoped to `invoice-docs-*` and `invoice-landing-*` buckets; actions include `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` |
 | Secrets Manager | Interface | Aurora credential retrieval | Default (full access) |
 | KMS | Interface | Encryption key operations | Default (full access) |
 | CloudWatch Monitoring | Interface | Metric publishing | Default (full access) |
 | CloudWatch Logs | Interface | Log streaming | Default (full access) |
+| STS | Interface | IAM role assumption (Lambda, Transfer Family) | Default (full access) |
 
 ### Security Groups
 
 | Security Group | Ingress | Egress | Attached To |
 |---|---|---|---|
-| `sg-app` | None | HTTPS (443) to 0.0.0.0/0, PostgreSQL (5432) to sg-aurora | Lambda/ECS |
+| `sg-app` | None | HTTPS (443) to 0.0.0.0/0, PostgreSQL (5432) to sg-aurora | Lambda |
 | `sg-aurora` | PostgreSQL (5432) from sg-app only | None | Aurora, RDS Proxy |
 | `sg-vpc-endpoints` | HTTPS (443) from app subnet CIDRs | None | Interface VPC Endpoints |
 
@@ -406,17 +426,22 @@ graph TD
 ```mermaid
 graph TD
     subgraph IAMBoundary["IAM Role Boundaries"]
-        subgraph Ingestion["Ingestion Roles (shared policy)"]
+        subgraph Ingestion["Lambda Ingestion Role"]
             LambdaRole["invoice-ingestion-lambda-{env}"]
-            ECSRole["invoice-ingestion-ecs-{env}"]
         end
 
-        subgraph IngestionPerms["Shared Ingestion Policy"]
-            S3Put["s3:PutObject, GetObject,<br/>GetObjectVersion"]
-            S3List["s3:ListBucket"]
+        subgraph IngestionPerms["Lambda Ingestion Policy"]
+            S3DocsPut["s3:PutObject, GetObject,<br/>GetObjectVersion<br/>(documents bucket)"]
+            S3LandingRead["s3:GetObject, GetObjectVersion,<br/>DeleteObject<br/>(landing bucket)"]
+            S3List["s3:ListBucket<br/>(both buckets)"]
             KMSUse["kms:GenerateDataKey,<br/>Decrypt, DescribeKey"]
             SMGet["secretsmanager:<br/>GetSecretValue"]
             CWWrite["logs:CreateLogStream,<br/>PutLogEvents"]
+        end
+
+        subgraph SFTP["SFTP Roles"]
+            SFTPLogging["invoice-sftp-logging-{env}<br/>(CloudWatch Logs)"]
+            SFTPUser["invoice-sftp-user-{env}<br/>(s3:PutObject on landing bucket)"]
         end
 
         subgraph Migration["Migration Role"]
@@ -426,7 +451,6 @@ graph TD
         end
 
         LambdaRole --> IngestionPerms
-        ECSRole --> IngestionPerms
         MigRole --> MigS3
         MigRole --> MigKMS
     end
@@ -442,9 +466,10 @@ graph TD
         AppSG["SG: App Tier<br/>Egress: 443 (HTTPS), 5432 (PG)<br/>No Ingress"]
         AuroraSG["SG: Aurora<br/>Ingress: 5432 from App SG only<br/>No Egress"]
         VPCESG["SG: VPC Endpoints<br/>Ingress: 443 from App CIDRs<br/>No Egress"]
-        DataSubnet["Data Subnets<br/>No internet route<br/>No NAT Gateway route"]
-        S3Policy["S3 VPC Endpoint Policy<br/>Scoped to invoice-docs-* only"]
+        DataSubnet["Data Subnets<br/>No internet route<br/>No NAT route"]
+        S3Policy["S3 VPC Endpoint Policy<br/>Scoped to invoice-docs-*<br/>and invoice-landing-*"]
         FlowLogs["VPC Flow Logs<br/>All traffic logged"]
+        NoEgress["No Internet Egress<br/>No NAT Gateway<br/>No Internet Gateway"]
     end
 
     style NetworkBoundary fill:#e3f2fd,stroke:#2196f3
@@ -495,6 +520,42 @@ The KMS key policy follows the **root admin delegation** pattern:
 | `kms-throttles-{env}` | ThrottleCount | > 10 per period | 5 min |
 
 All alarms send notifications to the `invoice-alerts-{env}` SNS topic, which forwards to the configured email address. Both ALARM and OK transitions are notified.
+
+### SNS Topics
+
+| Topic | Purpose | Subscribers |
+|---|---|---|
+| `invoice-alerts-{env}` | Infrastructure alarms, S3 document events | Alert email |
+| `invoice-file-notifications-{env}` | Landing zone file drop events (S3 ObjectCreated) | Ingestion Lambda, external email system |
+
+The file notification topic is separate from alerts to avoid mixing infrastructure alarms with file ingestion events. External systems subscribe to `invoice-file-notifications-{env}` to trigger customer email notifications when vendors drop files.
+
+### Splunk Log Streaming
+
+All CloudWatch log groups are streamed to Splunk in real-time via Kinesis Data Firehose:
+
+```
+CloudWatch Logs → Subscription Filter → Kinesis Firehose → Splunk HEC
+```
+
+| Component | Details |
+|---|---|
+| Delivery stream | `invoice-logs-to-splunk-{env}` |
+| Destination | Splunk HTTP Event Collector (HEC) |
+| Log groups streamed | Application, Aurora, Migration, VPC Flow Logs (4 subscription filters) |
+| Splunk index routing | Configured via per-environment HEC token on the Splunk side |
+| Failed delivery backup | `invoice-firehose-backup-{env}` S3 bucket (14-day expiry, GZIP) |
+| IAM roles | `invoice-firehose-splunk-{env}` (Firehose → S3 backup), `invoice-cwlogs-to-firehose-{env}` (CW Logs → Firehose) |
+
+**Splunk index mapping** — Each environment has its own HEC token configured in Splunk, routing to the appropriate index:
+
+| Environment | Splunk Index (example) |
+|---|---|
+| QA | `invoice_qa` |
+| Stage | `invoice_stage` |
+| Prod | `invoice_prod` |
+
+Splunk streaming is optional — set `splunk_hec_endpoint = ""` (default) to disable all Firehose resources.
 
 ### CloudWatch Dashboard
 

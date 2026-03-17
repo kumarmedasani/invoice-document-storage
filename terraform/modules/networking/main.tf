@@ -13,8 +13,6 @@ locals {
   # Data subnets: x.x.11.0/24, x.x.12.0/24, x.x.13.0/24
   data_subnet_cidrs = [for i in range(var.az_count) : cidrsubnet(var.vpc_cidr, 8, i + 11)]
 
-  # NAT Gateway count: 0 if disabled, 1 if single, az_count if multi
-  nat_count = var.enable_nat_gateway ? (var.single_nat_gateway ? 1 : var.az_count) : 0
 }
 
 # -----------------------------------------------------------------------------
@@ -63,88 +61,6 @@ resource "aws_subnet" "data" {
 }
 
 # -----------------------------------------------------------------------------
-# Internet Gateway (only if NAT Gateway is enabled)
-# -----------------------------------------------------------------------------
-resource "aws_internet_gateway" "main" {
-  count = var.enable_nat_gateway ? 1 : 0
-
-  vpc_id = aws_vpc.main.id
-
-  tags = merge(var.tags, {
-    Name = "invoice-igw-${var.env}"
-  })
-}
-
-# -----------------------------------------------------------------------------
-# Elastic IPs for NAT Gateways
-# -----------------------------------------------------------------------------
-resource "aws_eip" "nat" {
-  count = local.nat_count
-
-  domain = "vpc"
-
-  tags = merge(var.tags, {
-    Name = "invoice-nat-eip-${var.env}-${count.index}"
-  })
-}
-
-# -----------------------------------------------------------------------------
-# Public Subnet for NAT Gateway (NAT needs a public subnet to sit in)
-# DECISION: Creating minimal public subnets solely for NAT Gateway placement.
-# No other resources are placed here. CIDRs: x.x.100.0/28, x.x.101.0/28, etc.
-# -----------------------------------------------------------------------------
-resource "aws_subnet" "nat" {
-  count = local.nat_count
-
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 12, 1600 + count.index)
-  availability_zone = local.azs[count.index]
-
-  tags = merge(var.tags, {
-    Name = "invoice-nat-subnet-${var.env}-${local.azs[count.index]}"
-    Tier = "nat"
-  })
-}
-
-resource "aws_route_table" "nat" {
-  count = var.enable_nat_gateway ? 1 : 0
-
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main[0].id
-  }
-
-  tags = merge(var.tags, {
-    Name = "invoice-nat-rt-${var.env}"
-  })
-}
-
-resource "aws_route_table_association" "nat" {
-  count = local.nat_count
-
-  subnet_id      = aws_subnet.nat[count.index].id
-  route_table_id = aws_route_table.nat[0].id
-}
-
-# -----------------------------------------------------------------------------
-# NAT Gateways
-# -----------------------------------------------------------------------------
-resource "aws_nat_gateway" "main" {
-  count = local.nat_count
-
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.nat[count.index].id
-
-  tags = merge(var.tags, {
-    Name = "invoice-nat-${var.env}-${local.azs[count.index]}"
-  })
-
-  depends_on = [aws_internet_gateway.main]
-}
-
-# -----------------------------------------------------------------------------
 # Route Tables — App Subnets
 # -----------------------------------------------------------------------------
 resource "aws_route_table" "app" {
@@ -155,14 +71,6 @@ resource "aws_route_table" "app" {
   tags = merge(var.tags, {
     Name = "invoice-app-rt-${var.env}-${local.azs[count.index]}"
   })
-}
-
-resource "aws_route" "app_nat" {
-  count = var.enable_nat_gateway ? var.az_count : 0
-
-  route_table_id         = aws_route_table.app[count.index].id
-  destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = var.single_nat_gateway ? aws_nat_gateway.main[0].id : aws_nat_gateway.main[count.index].id
 }
 
 resource "aws_route_table_association" "app" {
@@ -212,11 +120,14 @@ resource "aws_vpc_endpoint" "s3" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
+          "s3:DeleteObject",
           "s3:ListBucket"
         ]
         Resource = [
           "arn:aws:s3:::invoice-docs-*",
-          "arn:aws:s3:::invoice-docs-*/*"
+          "arn:aws:s3:::invoice-docs-*/*",
+          "arn:aws:s3:::invoice-landing-*",
+          "arn:aws:s3:::invoice-landing-*/*"
         ]
       }
     ]
@@ -257,6 +168,7 @@ locals {
     kms            = "com.amazonaws.${var.aws_region}.kms"
     monitoring     = "com.amazonaws.${var.aws_region}.monitoring"
     logs           = "com.amazonaws.${var.aws_region}.logs"
+    sts            = "com.amazonaws.${var.aws_region}.sts"
   }
 }
 
@@ -276,7 +188,7 @@ resource "aws_vpc_endpoint" "interface" {
 }
 
 # -----------------------------------------------------------------------------
-# Security Group — App (Lambda/ECS)
+# Security Group — App (Lambda)
 # -----------------------------------------------------------------------------
 resource "aws_security_group" "app" {
   name_prefix = "invoice-app-${var.env}-"

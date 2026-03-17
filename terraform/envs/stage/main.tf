@@ -18,13 +18,11 @@ locals {
 module "networking" {
   source = "../../modules/networking"
 
-  env                = var.env
-  vpc_cidr           = var.vpc_cidr
-  az_count           = var.az_count
-  enable_nat_gateway = var.enable_nat_gateway
-  single_nat_gateway = var.single_nat_gateway
-  aws_region         = var.aws_region
-  tags               = local.common_tags
+  env        = var.env
+  vpc_cidr   = var.vpc_cidr
+  az_count   = var.az_count
+  aws_region = var.aws_region
+  tags       = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -64,17 +62,20 @@ module "aurora_postgres" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  env                    = var.env
-  aws_account_id         = var.aws_account_id
-  aws_region             = var.aws_region
-  aurora_cluster_id      = module.aurora_postgres.cluster_id
-  s3_bucket_name         = "invoice-docs-${var.env}"
-  kms_key_id             = module.kms.key_id
-  kms_key_arn            = module.kms.key_arn
-  alert_email            = var.alert_email
-  log_retention_days     = var.log_retention_days
-  aurora_max_connections = var.aurora_max_connections
-  tags                   = local.common_tags
+  env                     = var.env
+  aws_account_id          = var.aws_account_id
+  aws_region              = var.aws_region
+  aurora_cluster_id       = module.aurora_postgres.cluster_id
+  s3_bucket_name          = "invoice-docs-${var.env}"
+  kms_key_id              = module.kms.key_id
+  kms_key_arn             = module.kms.key_arn
+  alert_email             = var.alert_email
+  log_retention_days      = var.log_retention_days
+  aurora_max_connections   = var.aurora_max_connections
+  splunk_hec_endpoint     = var.splunk_hec_endpoint
+  splunk_hec_token        = var.splunk_hec_token
+  vpc_flow_log_group_name = module.networking.vpc_flow_log_group_name
+  tags                    = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -92,6 +93,20 @@ module "s3_documents" {
 }
 
 # -----------------------------------------------------------------------------
+# Transfer Family SFTP (depends on: kms, monitoring)
+# Vendors drop files via SFTP → landing zone bucket → SNS → Lambda
+# -----------------------------------------------------------------------------
+module "transfer_family" {
+  source = "../../modules/transfer_family"
+
+  env                        = var.env
+  kms_key_arn                = module.kms.key_arn
+  log_group_arn              = module.monitoring.log_group_application_arn
+  notification_sns_topic_arn = module.monitoring.file_notification_sns_topic_arn
+  tags                       = local.common_tags
+}
+
+# -----------------------------------------------------------------------------
 # IAM (depends on: s3, kms, aurora — no circular deps now)
 # -----------------------------------------------------------------------------
 module "iam" {
@@ -100,9 +115,9 @@ module "iam" {
   env               = var.env
   aws_account_id    = var.aws_account_id
   aws_region        = var.aws_region
-  s3_bucket_arn     = module.s3_documents.bucket_arn
-  kms_key_arn       = module.kms.key_arn
-  master_secret_arn = module.aurora_postgres.master_secret_arn
-  ingestion_runtime = var.ingestion_runtime
-  tags              = local.common_tags
+  s3_bucket_arn      = module.s3_documents.bucket_arn
+  landing_bucket_arn = module.transfer_family.landing_bucket_arn
+  kms_key_arn        = module.kms.key_arn
+  master_secret_arn  = module.aurora_postgres.master_secret_arn
+  tags               = local.common_tags
 }

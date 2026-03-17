@@ -21,18 +21,6 @@ variable "az_count" {
   }
 }
 
-variable "enable_nat_gateway" {
-  description = "Whether to create NAT Gateways (false for QA, true for Stage/Prod)"
-  type        = bool
-  default     = false
-}
-
-variable "single_nat_gateway" {
-  description = "Use a single NAT Gateway instead of one per AZ (true for Stage, false for Prod)"
-  type        = bool
-  default     = false
-}
-
 variable "aws_region" {
   description = "AWS region for VPC endpoint service names"
   type        = string

@@ -116,17 +116,16 @@ The platform has **zero public-facing resources**:
 
 | Tier | Internet Access | Purpose |
 |---|---|---|
-| App Subnets | Via NAT Gateway (Stage/Prod), None (QA) | Lambda/ECS ingestion |
+| App Subnets | **None** (VPC endpoints only) | Lambda ingestion |
 | Data Subnets | **None** (no NAT route, no IGW route) | Aurora PostgreSQL, RDS Proxy |
-| NAT Subnets | Public (minimal /28 CIDRs) | NAT Gateway placement only |
 
-Data subnets have **no route to the internet** — they can only communicate with the VPC (app subnets, VPC endpoints).
+There are no public subnets, no NAT Gateways, and no Internet Gateway. All AWS service access uses VPC endpoints (S3 Gateway, Secrets Manager, KMS, CloudWatch Logs, CloudWatch Monitoring, STS). Both app and data subnets have **no route to the internet**.
 
 ### Security Group Rules
 
 | Security Group | Direction | Port | Source/Destination | Purpose |
 |---|---|---|---|---|
-| sg-app | Egress | 443 | 0.0.0.0/0 | HTTPS to VPC endpoints, NAT |
+| sg-app | Egress | 443 | 0.0.0.0/0 | HTTPS to VPC endpoints |
 | sg-app | Egress | 5432 | sg-aurora | PostgreSQL to Aurora |
 | sg-aurora | Ingress | 5432 | sg-app | PostgreSQL from app only |
 | sg-vpc-endpoints | Ingress | 443 | App subnet CIDRs | HTTPS from app subnets |
@@ -134,25 +133,28 @@ Data subnets have **no route to the internet** — they can only communicate wit
 **Key constraints:**
 - Aurora accepts connections **only** from the app security group (not from arbitrary IPs)
 - VPC endpoints accept HTTPS only from app subnet CIDRs
-- No ingress rules on the app security group (Lambda/ECS initiate all connections)
+- No ingress rules on the app security group (Lambda initiates all connections)
+- No internet egress — all outbound traffic uses VPC endpoints
 
 ### S3 VPC Endpoint Policy
 
-The S3 Gateway Endpoint has a **scoped policy** that restricts access to `invoice-docs-*` buckets only:
+The S3 Gateway Endpoint has a **scoped policy** that restricts access to invoice buckets only:
 
 ```json
 {
   "Effect": "Allow",
   "Principal": "*",
-  "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+  "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
   "Resource": [
     "arn:aws:s3:::invoice-docs-*",
-    "arn:aws:s3:::invoice-docs-*/*"
+    "arn:aws:s3:::invoice-docs-*/*",
+    "arn:aws:s3:::invoice-landing-*",
+    "arn:aws:s3:::invoice-landing-*/*"
   ]
 }
 ```
 
-This prevents workloads in the VPC from accessing other S3 buckets through the endpoint.
+This prevents workloads in the VPC from accessing other S3 buckets through the endpoint. The `s3:DeleteObject` action is required for the Lambda to clean up processed files from the landing zone bucket.
 
 ### VPC Flow Logs
 
@@ -167,18 +169,21 @@ All VPC traffic (ACCEPT and REJECT) is logged to CloudWatch Logs:
 
 | Role | Trust Principal | Permissions |
 |---|---|---|
-| `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | S3, KMS, Secrets Manager, CloudWatch Logs |
-| `invoice-ingestion-ecs-{env}` | `ecs-tasks.amazonaws.com` | S3, KMS, Secrets Manager, CloudWatch Logs |
+| `invoice-ingestion-lambda-{env}` | `lambda.amazonaws.com` | S3 (documents + landing), KMS, Secrets Manager, CloudWatch Logs |
+| `invoice-sftp-logging-{env}` | `transfer.amazonaws.com` | CloudWatch Logs (Transfer Family structured logging) |
+| `invoice-sftp-user-{env}` | `transfer.amazonaws.com` | S3 PutObject on landing bucket, KMS encrypt |
 | `invoice-migration-{env}` | `datasync.amazonaws.com`, root account | S3, KMS |
 | `invoice-aurora-monitoring-{env}` | `monitoring.rds.amazonaws.com` | Enhanced Monitoring |
 | `invoice-rds-proxy-{env}` | `rds.amazonaws.com` | Secrets Manager, KMS (Stage/Prod only) |
 | `invoice-vpc-flow-logs-{env}` | `vpc-flow-logs.amazonaws.com` | CloudWatch Logs |
+| `invoice-firehose-splunk-{env}` | `firehose.amazonaws.com` | S3 backup write, KMS decrypt (Splunk delivery) |
+| `invoice-cwlogs-to-firehose-{env}` | `logs.amazonaws.com` | Firehose PutRecord/PutRecordBatch |
 
 ### Least-Privilege Principles
 
 1. **No wildcard resources** — All IAM policies scope permissions to specific resource ARNs (bucket ARN, key ARN, secret ARN, log group ARN pattern)
-2. **No `s3:DeleteObject`** — The ingestion policy does not grant delete permissions; deletions are soft-deletes (status change to `'deleted'`)
-3. **Separate roles per workload** — Lambda and ECS have distinct roles even though they share the same policy, allowing independent trust and audit
+2. **Scoped `s3:DeleteObject`** — The Lambda ingestion role has `s3:DeleteObject` only on the landing bucket (to clean up processed files). No delete permission exists on the documents bucket; deletions there are soft-deletes (status change to `'deleted'`)
+3. **SFTP users scoped to landing bucket** — The SFTP user role can only `PutObject` to the landing bucket, with no access to the documents bucket or database
 4. **Migration role is temporary** — The DataSync/ETL role can be removed after migration is complete
 
 ### Database Roles
@@ -204,7 +209,7 @@ Aurora uses `manage_master_user_password = true`, which:
 
 ### No Static Credentials
 
-- **No IAM access keys** — All compute uses IAM roles (Lambda execution role, ECS task role)
+- **No IAM access keys** — All compute uses IAM roles (Lambda execution role, SFTP user role)
 - **No hardcoded passwords** — Aurora credentials are managed by Secrets Manager
 - **CI/CD uses OIDC** — GitHub Actions authenticates via OpenID Connect, no static AWS keys
 
@@ -223,6 +228,10 @@ Aurora uses `manage_master_user_password = true`, which:
 | Aurora PostgreSQL | `/invoice/aurora/{env}` | PostgreSQL log format |
 | Migration ETL | `/invoice/migration/{env}` | Structured JSON |
 | VPC traffic | `/aws/vpc/invoice-vpc-{env}/flow-logs` | VPC Flow Log format |
+
+### Splunk Log Streaming
+
+All CloudWatch log groups are streamed to Splunk via Kinesis Data Firehose using subscription filters. Each environment uses a separate Splunk HEC token that routes to an environment-specific index. Failed deliveries are backed up to an S3 bucket (`invoice-firehose-backup-{env}`, 14-day expiry). This provides centralized log correlation, alerting, and long-term retention beyond CloudWatch's retention window.
 
 ### S3 Access Logs
 
@@ -255,6 +264,20 @@ All alarm state transitions (ALARM, OK) are published to SNS, creating an audit 
 | HTTPS-Only Policy | Yes | Yes | Yes |
 | Access Logging | Yes | Yes | Yes |
 | Lifecycle (expire) | 3650 days | 3650 days | 3650 days |
+
+### S3 Landing Zone Protection
+
+The landing zone bucket (`invoice-landing-{env}`) is a transient staging area for SFTP uploads:
+
+| Control | All Environments |
+|---|---|
+| SSE-KMS Encryption | Yes (same KMS key as documents bucket) |
+| Public Access Block | All 4 blocks enabled |
+| HTTPS-Only Policy | Yes |
+| Object Lock | No (files are transient, deleted after processing) |
+| Lifecycle (expire) | 7 days (safety net for unprocessed files) |
+| Multipart Abort | 1 day |
+| S3 Event Notification | ObjectCreated → SNS → Lambda |
 
 ### Aurora Data Protection
 
