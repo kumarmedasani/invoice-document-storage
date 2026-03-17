@@ -84,3 +84,16 @@ variable "cost_center" {
   type        = string
 }
 
+variable "splunk_hec_endpoint" {
+  description = "Splunk HEC endpoint URL (empty string to disable Splunk log streaming)"
+  type        = string
+  default     = ""
+}
+
+variable "splunk_hec_token" {
+  description = "Splunk HEC token (each env uses a different token mapped to its Splunk index)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+

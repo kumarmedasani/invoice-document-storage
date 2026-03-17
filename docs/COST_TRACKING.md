@@ -33,10 +33,12 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | VPC Endpoints (5 Interface) | ~$19 | ~$19 | ~$28 | $0.01/hour/AZ + data |
 | AWS Transfer Family (SFTP) | ~$22 | ~$22 | ~$22 | $0.30/hour for SFTP server |
 | VPC Flow Logs | ~$2 | ~$2 | ~$5 | CloudWatch Logs ingestion |
-| SNS | < $1 | < $1 | < $1 | Negligible for alarm emails |
+| Kinesis Firehose (Splunk) | ~$5 | ~$10 | ~$20 | $0.029/GB ingested |
+| S3 Firehose Backup Bucket | < $1 | < $1 | < $1 | Failed deliveries only, 14-day expiry |
+| SNS (2 topics) | < $1 | < $1 | < $1 | Alerts + file notifications |
 | Data Transfer | ~$2 | ~$5 | ~$10 | Within-AZ mostly free |
-| **Monthly Total** | **~$128** | **~$290** | **~$588** | |
-| **Annual Total** | **~$1,536** | **~$3,480** | **~$7,056** | |
+| **Monthly Total** | **~$135** | **~$302** | **~$611** | |
+| **Annual Total** | **~$1,620** | **~$3,624** | **~$7,332** | |
 
 ### Cost Notes
 
@@ -46,6 +48,8 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 - **S3 costs scale with data volume** — the Glacier and Deep Archive estimates assume steady-state after migration
 - **KMS bucket keys** reduce KMS API costs by ~99% — S3 uses a bucket-level key instead of per-object KMS calls
 - **VPC endpoint costs increase with AZ count** — Prod has 3 AZs vs. 2 for QA/Stage ($7.50/endpoint/AZ/month). 5 interface endpoints: Secrets Manager, KMS, CloudWatch Monitoring, CloudWatch Logs, STS
+- **Kinesis Firehose** charges $0.029/GB of data ingested. At 5 GB/day of logs, that's ~$4.50/month. Costs scale with log volume
+- **Splunk streaming is optional** — set `splunk_hec_endpoint = ""` (default) to disable Firehose and eliminate this cost entirely
 
 ## Cost Breakdown by Service
 
@@ -85,6 +89,15 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | Data upload (per GB) | $0.04/GB |
 
 The SFTP server runs 24/7. Data upload costs depend on vendor volume — at 100 GB/month, transfer costs are ~$4/month.
+
+### Kinesis Data Firehose (Splunk Streaming)
+
+| Component | Cost |
+|---|---|
+| Data ingestion (per GB) | $0.029/GB |
+| S3 backup bucket (failed deliveries) | $0.023/GB (14-day expiry, negligible) |
+
+Firehose costs scale linearly with log volume. At 5 GB/day of CloudWatch Logs, monthly cost is ~$4.50. Splunk streaming is disabled by default (`splunk_hec_endpoint = ""`).
 
 ## AWS Cost Explorer Setup
 

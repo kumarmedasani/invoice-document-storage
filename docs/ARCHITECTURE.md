@@ -33,7 +33,9 @@ Each environment (QA, Stage, Prod) follows the same topology with differences in
 graph TD
     Vendors["Vendors (SFTP)"] -->|SFTP Port 22| SFTP["AWS Transfer Family"]
     SFTP -->|Upload| Landing["S3 Landing Zone<br/>invoice-landing-{env}<br/>(7-day expiry)"]
-    Landing -->|S3 Event → SNS| Lambda
+    Landing -->|S3 Event| FileSNS["SNS File Notifications"]
+    FileSNS -->|Trigger| Lambda
+    FileSNS -->|Notify| ExtEmail["External Email System"]
 
     subgraph VPC["VPC (10.x.0.0/16) — No internet egress"]
         subgraph AppSubnets["App Subnets (Private)"]
@@ -61,10 +63,16 @@ graph TD
     Proxy --> Aurora
     Lambda --> CWEP
 
+    subgraph Observability["Log Streaming"]
+        CWLogs["CloudWatch Logs"] -->|Subscription Filters| Firehose["Kinesis Firehose"]
+        Firehose -->|HEC| Splunk["Splunk<br/>(per-env index)"]
+    end
+
     style VPC fill:#f0f8ff,stroke:#4a90d9
     style AppSubnets fill:#e8f5e9,stroke:#66bb6a
     style DataSubnets fill:#fff3e0,stroke:#ffa726
     style Endpoints fill:#f3e5f5,stroke:#ab47bc
+    style Observability fill:#e0f7fa,stroke:#00838f
 ```
 
 ### Environment Differences
@@ -92,7 +100,7 @@ graph LR
     networking["networking<br/>(VPC, Subnets, SGs,<br/>Endpoints, Flow Logs)"]
     kms["kms<br/>(KMS Key, Alias,<br/>Key Policy)"]
     aurora["aurora_postgres<br/>(Cluster, Instances,<br/>RDS Proxy)"]
-    monitoring["monitoring<br/>(Log Groups, SNS,<br/>Alarms, Dashboard)"]
+    monitoring["monitoring<br/>(Log Groups, SNS Topics,<br/>Alarms, Dashboard,<br/>Firehose → Splunk)"]
     s3["s3_documents<br/>(Bucket, Lifecycle,<br/>Object Lock, Logging)"]
     transfer["transfer_family<br/>(SFTP Server, Landing Bucket,<br/>S3 Notification)"]
     iam["iam<br/>(Lambda Role,<br/>Migration Role)"]
@@ -104,7 +112,8 @@ graph LR
     kms --> s3
     monitoring -->|sns_topic_arn| s3
     kms --> transfer
-    monitoring -->|sns_topic_arn| transfer
+    monitoring -->|file_notification_sns_topic_arn| transfer
+    monitoring -->|vpc_flow_log_group_name| networking
     s3 --> iam
     transfer -->|landing_bucket_arn| iam
     kms --> iam
@@ -129,7 +138,8 @@ sequenceDiagram
     participant Vendor as Vendor (SFTP)
     participant SFTP as AWS Transfer Family
     participant Landing as S3 Landing Zone<br/>(invoice-landing-{env})
-    participant SNS as SNS Topic
+    participant SNS as SNS File Notifications
+    participant ExtEmail as External Email System
     participant Lambda as Ingestion Lambda
     participant SM as Secrets Manager<br/>(via VPC Endpoint)
     participant S3 as S3 Documents<br/>(invoice-docs-{env})
@@ -140,6 +150,7 @@ sequenceDiagram
     SFTP->>Landing: Write to landing bucket
     Landing->>SNS: s3:ObjectCreated:* notification
     SNS->>Lambda: Trigger ingestion
+    SNS->>ExtEmail: File drop notification<br/>(for customer email)
     Lambda->>Landing: GetObject (download file)
     alt File is ZIP
         Lambda->>Lambda: Extract ZIP in /tmp
@@ -166,6 +177,8 @@ sequenceDiagram
 - **RDS Proxy** (Stage/Prod) pools connections and handles failover transparently. The Lambda connects to the proxy endpoint; the proxy forwards to the Aurora writer
 - **S3 Bucket Keys** reduce KMS API calls by ~99% — S3 generates per-object keys locally using a bucket-level key, avoiding a KMS API call per PutObject
 - **Structured JSON logging** via CloudWatch ensures all ingestion events are searchable and parseable
+- **File drop notifications** — When a file lands in the landing zone, the S3 event publishes to a dedicated SNS topic (`invoice-file-notifications-{env}`). Both the Lambda (for processing) and external systems (for customer email) subscribe to this topic
+- **Splunk log streaming** — All CloudWatch log groups are streamed to Splunk via Kinesis Data Firehose subscription filters. Each environment uses a separate Splunk HEC token mapped to its own index
 
 ## Document Retrieval Flow
 
@@ -507,6 +520,42 @@ The KMS key policy follows the **root admin delegation** pattern:
 | `kms-throttles-{env}` | ThrottleCount | > 10 per period | 5 min |
 
 All alarms send notifications to the `invoice-alerts-{env}` SNS topic, which forwards to the configured email address. Both ALARM and OK transitions are notified.
+
+### SNS Topics
+
+| Topic | Purpose | Subscribers |
+|---|---|---|
+| `invoice-alerts-{env}` | Infrastructure alarms, S3 document events | Alert email |
+| `invoice-file-notifications-{env}` | Landing zone file drop events (S3 ObjectCreated) | Ingestion Lambda, external email system |
+
+The file notification topic is separate from alerts to avoid mixing infrastructure alarms with file ingestion events. External systems subscribe to `invoice-file-notifications-{env}` to trigger customer email notifications when vendors drop files.
+
+### Splunk Log Streaming
+
+All CloudWatch log groups are streamed to Splunk in real-time via Kinesis Data Firehose:
+
+```
+CloudWatch Logs → Subscription Filter → Kinesis Firehose → Splunk HEC
+```
+
+| Component | Details |
+|---|---|
+| Delivery stream | `invoice-logs-to-splunk-{env}` |
+| Destination | Splunk HTTP Event Collector (HEC) |
+| Log groups streamed | Application, Aurora, Migration, VPC Flow Logs (4 subscription filters) |
+| Splunk index routing | Configured via per-environment HEC token on the Splunk side |
+| Failed delivery backup | `invoice-firehose-backup-{env}` S3 bucket (14-day expiry, GZIP) |
+| IAM roles | `invoice-firehose-splunk-{env}` (Firehose → S3 backup), `invoice-cwlogs-to-firehose-{env}` (CW Logs → Firehose) |
+
+**Splunk index mapping** — Each environment has its own HEC token configured in Splunk, routing to the appropriate index:
+
+| Environment | Splunk Index (example) |
+|---|---|
+| QA | `invoice_qa` |
+| Stage | `invoice_stage` |
+| Prod | `invoice_prod` |
+
+Splunk streaming is optional — set `splunk_hec_endpoint = ""` (default) to disable all Firehose resources.
 
 ### CloudWatch Dashboard
 

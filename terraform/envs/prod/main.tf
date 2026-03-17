@@ -62,17 +62,20 @@ module "aurora_postgres" {
 module "monitoring" {
   source = "../../modules/monitoring"
 
-  env                    = var.env
-  aws_account_id         = var.aws_account_id
-  aws_region             = var.aws_region
-  aurora_cluster_id      = module.aurora_postgres.cluster_id
-  s3_bucket_name         = "invoice-docs-${var.env}"
-  kms_key_id             = module.kms.key_id
-  kms_key_arn            = module.kms.key_arn
-  alert_email            = var.alert_email
-  log_retention_days     = var.log_retention_days
-  aurora_max_connections = var.aurora_max_connections
-  tags                   = local.common_tags
+  env                     = var.env
+  aws_account_id          = var.aws_account_id
+  aws_region              = var.aws_region
+  aurora_cluster_id       = module.aurora_postgres.cluster_id
+  s3_bucket_name          = "invoice-docs-${var.env}"
+  kms_key_id              = module.kms.key_id
+  kms_key_arn             = module.kms.key_arn
+  alert_email             = var.alert_email
+  log_retention_days      = var.log_retention_days
+  aurora_max_connections   = var.aurora_max_connections
+  splunk_hec_endpoint     = var.splunk_hec_endpoint
+  splunk_hec_token        = var.splunk_hec_token
+  vpc_flow_log_group_name = module.networking.vpc_flow_log_group_name
+  tags                    = local.common_tags
 }
 
 # -----------------------------------------------------------------------------
@@ -99,7 +102,7 @@ module "transfer_family" {
   env                        = var.env
   kms_key_arn                = module.kms.key_arn
   log_group_arn              = module.monitoring.log_group_application_arn
-  notification_sns_topic_arn = module.monitoring.sns_topic_arn
+  notification_sns_topic_arn = module.monitoring.file_notification_sns_topic_arn
   tags                       = local.common_tags
 }
 

@@ -49,6 +49,25 @@ variable "aurora_max_connections" {
   type        = number
 }
 
+variable "splunk_hec_endpoint" {
+  description = "Splunk HTTP Event Collector endpoint URL (empty string to disable Splunk streaming)"
+  type        = string
+  default     = ""
+}
+
+variable "splunk_hec_token" {
+  description = "Splunk HEC token for authentication (each env should use a different token mapped to its Splunk index)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "vpc_flow_log_group_name" {
+  description = "Name of the VPC Flow Logs CloudWatch log group (for Splunk subscription filter)"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)

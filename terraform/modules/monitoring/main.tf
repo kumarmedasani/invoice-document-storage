@@ -2,6 +2,12 @@
 
 locals {
   connection_threshold = floor(var.aurora_max_connections * 0.8)
+  enable_splunk        = var.splunk_hec_endpoint != ""
+  log_groups = {
+    application = aws_cloudwatch_log_group.application.name
+    aurora      = aws_cloudwatch_log_group.aurora.name
+    migration   = aws_cloudwatch_log_group.migration.name
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -278,4 +284,244 @@ resource "aws_cloudwatch_dashboard" "main" {
       }
     ]
   })
+}
+
+# -----------------------------------------------------------------------------
+# SNS Topic for File Drop Notifications
+# External systems subscribe to this topic to trigger customer email on new
+# file ingestion. Separate from the alerts topic to avoid mixing concerns.
+# -----------------------------------------------------------------------------
+resource "aws_sns_topic" "file_notifications" {
+  name              = "invoice-file-notifications-${var.env}"
+  kms_master_key_id = var.kms_key_id
+
+  tags = merge(var.tags, {
+    Name = "invoice-file-notifications-${var.env}"
+  })
+}
+
+resource "aws_sns_topic_policy" "file_notifications" {
+  arn = aws_sns_topic.file_notifications.arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowS3Publish"
+        Effect    = "Allow"
+        Principal = { Service = "s3.amazonaws.com" }
+        Action    = "SNS:Publish"
+        Resource  = aws_sns_topic.file_notifications.arn
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:s3:::invoice-landing-*"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# -----------------------------------------------------------------------------
+# Kinesis Data Firehose → Splunk
+# Streams all CloudWatch Logs to Splunk via HTTP Event Collector (HEC).
+# Each environment uses a separate HEC token configured on the Splunk side
+# to route logs to the correct index (e.g., invoice_qa, invoice_stage, invoice_prod).
+# Disabled when splunk_hec_endpoint is empty.
+# -----------------------------------------------------------------------------
+resource "aws_s3_bucket" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = "invoice-firehose-backup-${var.env}"
+
+  tags = merge(var.tags, {
+    Name = "invoice-firehose-backup-${var.env}"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = aws_s3_bucket.firehose_backup[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = aws_s3_bucket.firehose_backup[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = var.kms_key_arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "firehose_backup" {
+  count  = local.enable_splunk ? 1 : 0
+  bucket = aws_s3_bucket.firehose_backup[0].id
+
+  rule {
+    id     = "expire-failed-deliveries"
+    status = "Enabled"
+
+    expiration {
+      days = 14
+    }
+  }
+}
+
+resource "aws_iam_role" "firehose" {
+  count = local.enable_splunk ? 1 : 0
+  name  = "invoice-firehose-splunk-${var.env}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "firehose" {
+  count = local.enable_splunk ? 1 : 0
+  name  = "invoice-firehose-splunk-${var.env}"
+  role  = aws_iam_role.firehose[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "S3BackupWrite"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.firehose_backup[0].arn,
+          "${aws_s3_bucket.firehose_backup[0].arn}/*"
+        ]
+      },
+      {
+        Sid    = "KMSAccess"
+        Effect = "Allow"
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = var.kms_key_arn
+      }
+    ]
+  })
+}
+
+resource "aws_kinesis_firehose_delivery_stream" "splunk" {
+  count       = local.enable_splunk ? 1 : 0
+  name        = "invoice-logs-to-splunk-${var.env}"
+  destination = "splunk"
+
+  splunk_configuration {
+    hec_endpoint      = var.splunk_hec_endpoint
+    hec_token         = var.splunk_hec_token
+    hec_endpoint_type = "Event"
+    retry_duration    = 300
+
+    s3_configuration {
+      role_arn           = aws_iam_role.firehose[0].arn
+      bucket_arn         = aws_s3_bucket.firehose_backup[0].arn
+      buffering_size     = 5
+      buffering_interval = 300
+      compression_format = "GZIP"
+    }
+
+    cloudwatch_logging_options {
+      enabled         = true
+      log_group_name  = aws_cloudwatch_log_group.application.name
+      log_stream_name = "firehose-splunk-errors"
+    }
+  }
+
+  tags = merge(var.tags, {
+    Name = "invoice-logs-to-splunk-${var.env}"
+  })
+}
+
+# -----------------------------------------------------------------------------
+# CW Logs → Firehose IAM Role
+# Allows CloudWatch Logs subscription filters to deliver to Firehose.
+# -----------------------------------------------------------------------------
+resource "aws_iam_role" "cw_to_firehose" {
+  count = local.enable_splunk ? 1 : 0
+  name  = "invoice-cwlogs-to-firehose-${var.env}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "logs.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+        Condition = {
+          StringLike = {
+            "aws:SourceArn" = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy" "cw_to_firehose" {
+  count = local.enable_splunk ? 1 : 0
+  name  = "invoice-cwlogs-to-firehose-${var.env}"
+  role  = aws_iam_role.cw_to_firehose[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["firehose:PutRecord", "firehose:PutRecordBatch"]
+        Resource = aws_kinesis_firehose_delivery_stream.splunk[0].arn
+      }
+    ]
+  })
+}
+
+# -----------------------------------------------------------------------------
+# CloudWatch Logs Subscription Filters → Firehose → Splunk
+# One filter per log group. Streams all log events (empty filter_pattern).
+# -----------------------------------------------------------------------------
+resource "aws_cloudwatch_log_subscription_filter" "splunk" {
+  for_each = local.enable_splunk ? local.log_groups : {}
+
+  name            = "splunk-${each.key}-${var.env}"
+  log_group_name  = each.value
+  filter_pattern  = ""
+  destination_arn = aws_kinesis_firehose_delivery_stream.splunk[0].arn
+  role_arn        = aws_iam_role.cw_to_firehose[0].arn
+}
+
+resource "aws_cloudwatch_log_subscription_filter" "splunk_vpc_flow_logs" {
+  count = local.enable_splunk && var.vpc_flow_log_group_name != "" ? 1 : 0
+
+  name            = "splunk-vpc-flow-logs-${var.env}"
+  log_group_name  = var.vpc_flow_log_group_name
+  filter_pattern  = ""
+  destination_arn = aws_kinesis_firehose_delivery_stream.splunk[0].arn
+  role_arn        = aws_iam_role.cw_to_firehose[0].arn
 }

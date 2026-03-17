@@ -18,6 +18,7 @@ This document contains step-by-step operational procedures for the Invoice Docum
 - [12. S3 Object Lock Operations](#12-s3-object-lock-operations)
 - [13. Troubleshooting: SFTP Connectivity](#13-troubleshooting-sftp-connectivity)
 - [14. Troubleshooting: Landing Zone Processing](#14-troubleshooting-landing-zone-processing)
+- [15. Troubleshooting: Splunk Log Streaming](#15-troubleshooting-splunk-log-streaming)
 
 ## Common Setup: Retrieve Aurora Credentials
 
@@ -818,3 +819,73 @@ aws cloudwatch get-metric-statistics \
 | Lambda AccessDenied on landing bucket | Missing `s3:GetObject` or `s3:DeleteObject` on landing bucket | Check Lambda IAM policy |
 | Lambda AccessDenied on documents bucket | Missing `s3:PutObject` on documents bucket | Check Lambda IAM policy |
 | Duplicate processing | S3 event delivered twice (at-least-once) | Implement idempotency via `s3_key` unique constraint in Aurora |
+
+---
+
+## 15. Troubleshooting: Splunk Log Streaming
+
+**When to use:** Logs are not appearing in Splunk, or there are gaps in log data.
+
+### Diagnostic Steps
+
+1. **Check Firehose delivery stream status:**
+
+```bash
+aws firehose describe-delivery-stream \
+  --delivery-stream-name "invoice-logs-to-splunk-$ENV" \
+  --query '{Status: DeliveryStreamDescription.DeliveryStreamStatus, LastUpdate: DeliveryStreamDescription.LastUpdateTimestamp}'
+```
+
+Expected status: `ACTIVE`.
+
+2. **Check subscription filters:**
+
+```bash
+for LOG_GROUP in "/invoice/application/$ENV" "/invoice/aurora/$ENV" "/invoice/migration/$ENV" "/aws/vpc/invoice-vpc-$ENV/flow-logs"; do
+  echo "=== $LOG_GROUP ==="
+  aws logs describe-subscription-filters \
+    --log-group-name "$LOG_GROUP" \
+    --query 'subscriptionFilters[*].{Name: filterName, Destination: destinationArn}' 2>/dev/null || echo "  No subscription filter"
+done
+```
+
+3. **Check Firehose error logs:**
+
+```bash
+aws logs filter-log-events \
+  --log-group-name "/invoice/application/$ENV" \
+  --log-stream-name-prefix "firehose-splunk-errors" \
+  --start-time $(date -d '1 hour ago' +%s000) \
+  --query 'events[*].message' --output text
+```
+
+4. **Check Firehose metrics (failed deliveries):**
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/Firehose \
+  --metric-name DeliveryToSplunk.DataFreshness \
+  --dimensions "Name=DeliveryStreamName,Value=invoice-logs-to-splunk-$ENV" \
+  --start-time "$(date -d '1 hour ago' -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period 300 --statistics Average
+```
+
+5. **Check S3 backup bucket for failed deliveries:**
+
+```bash
+aws s3 ls "s3://invoice-firehose-backup-$ENV/" --recursive --human-readable
+```
+
+Files here indicate Firehose could not deliver to Splunk HEC. Check HEC endpoint availability and token validity.
+
+### Common Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| No logs in Splunk | Subscription filters missing | Verify filters exist on all log groups |
+| Logs delayed (> 5 min) | Firehose buffering | Check `buffering_interval` setting |
+| Failed deliveries in S3 backup | Splunk HEC endpoint down | Verify HEC endpoint URL and connectivity |
+| 403 from Splunk HEC | Invalid or expired HEC token | Rotate token in Splunk, update `splunk_hec_token` tfvar |
+| Logs in wrong Splunk index | HEC token misconfigured | Verify token-to-index mapping in Splunk admin |
+| Partial log groups missing | Subscription filter limit (2 per log group) | Check if another subscription filter exists |

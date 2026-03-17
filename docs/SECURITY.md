@@ -176,6 +176,8 @@ All VPC traffic (ACCEPT and REJECT) is logged to CloudWatch Logs:
 | `invoice-aurora-monitoring-{env}` | `monitoring.rds.amazonaws.com` | Enhanced Monitoring |
 | `invoice-rds-proxy-{env}` | `rds.amazonaws.com` | Secrets Manager, KMS (Stage/Prod only) |
 | `invoice-vpc-flow-logs-{env}` | `vpc-flow-logs.amazonaws.com` | CloudWatch Logs |
+| `invoice-firehose-splunk-{env}` | `firehose.amazonaws.com` | S3 backup write, KMS decrypt (Splunk delivery) |
+| `invoice-cwlogs-to-firehose-{env}` | `logs.amazonaws.com` | Firehose PutRecord/PutRecordBatch |
 
 ### Least-Privilege Principles
 
@@ -226,6 +228,10 @@ Aurora uses `manage_master_user_password = true`, which:
 | Aurora PostgreSQL | `/invoice/aurora/{env}` | PostgreSQL log format |
 | Migration ETL | `/invoice/migration/{env}` | Structured JSON |
 | VPC traffic | `/aws/vpc/invoice-vpc-{env}/flow-logs` | VPC Flow Log format |
+
+### Splunk Log Streaming
+
+All CloudWatch log groups are streamed to Splunk via Kinesis Data Firehose using subscription filters. Each environment uses a separate Splunk HEC token that routes to an environment-specific index. Failed deliveries are backed up to an S3 bucket (`invoice-firehose-backup-{env}`, 14-day expiry). This provides centralized log correlation, alerting, and long-term retention beyond CloudWatch's retention window.
 
 ### S3 Access Logs
 

@@ -4,6 +4,8 @@ Generates a PNG diagram using official AWS icons via the 'diagrams' library.
 
 Layout: LR linear flow. Two-bucket design (landing zone + documents).
   External → SFTP → Landing Bucket → Lambda → Documents Bucket + Aurora
+  CloudWatch Logs → Kinesis Firehose → Splunk
+  Landing Bucket → SNS File Notifications → External Email System
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -16,6 +18,9 @@ from diagrams.aws.integration import SNS
 from diagrams.aws.compute import Lambda
 from diagrams.aws.migration import TransferForSftp
 from diagrams.aws.general import Users
+from diagrams.aws.analytics import KinesisDataFirehose
+from diagrams.saas.logging import Datadog  # placeholder for Splunk icon
+from diagrams.onprem.monitoring import Splunk
 
 graph_attr = {
     "fontsize": "18",
@@ -38,6 +43,8 @@ with Diagram(
     # ── External ─────────────────────────────────────────────────
     vendors = Users("Vendors\n(SFTP)")
     on_prem = Users("On-Premises\nLegacy Server")
+    ext_email = Users("External Email\nSystem")
+    splunk = Splunk("Splunk\n(per-env index)")
 
     with Cluster("AWS Cloud"):
 
@@ -69,10 +76,12 @@ with Diagram(
 
         # ── Supporting services ──────────────────────────────────
         with Cluster("Regional Services"):
-            cw = Cloudwatch("CloudWatch")
-            sns = SNS("SNS Alerts")
+            cw = Cloudwatch("CloudWatch\nLogs")
+            sns_alerts = SNS("SNS Alerts")
+            sns_file = SNS("SNS File\nNotifications")
             kms = KMS("KMS")
             sm = SecretsManager("Secrets Mgr")
+            firehose = KinesisDataFirehose("Kinesis\nFirehose")
 
     # ════════════════════════════════════════════════════════════
     #  Edges — left-to-right main flow, no circular routes
@@ -83,8 +92,10 @@ with Diagram(
     on_prem >> Edge(label="DataSync", color="orange", style="bold") >> sftp
     sftp >> Edge(label="ZIP / PDF", color="darkorange", style="bold") >> s3_landing
 
-    # Landing Zone → Lambda (S3 event trigger)
-    s3_landing >> Edge(label="S3 Event → SNS\n→ Lambda", color="darkgreen", style="bold") >> app_lambda
+    # Landing Zone → SNS File Notification → Lambda + External Email
+    s3_landing >> Edge(label="S3 Event", color="darkgreen", style="bold") >> sns_file
+    sns_file >> Edge(label="Trigger", color="darkgreen", style="bold") >> app_lambda
+    sns_file >> Edge(label="Notify", color="blue", style="bold") >> ext_email
 
     # Lambda → Documents Bucket (extracted files)
     app_lambda >> Edge(label="Extracted\nfiles", color="darkorange", style="bold") >> s3_docs
@@ -97,5 +108,7 @@ with Diagram(
     # S3 access logs
     s3_docs >> Edge(color="gray", style="dashed") >> s3_logs
 
-    # Monitoring (CW → SNS only; Flow Logs → CW implied by VPC placement)
-    cw >> Edge(label="Alarms", color="firebrick") >> sns
+    # Monitoring: CW → SNS Alerts, CW → Firehose → Splunk
+    cw >> Edge(label="Alarms", color="firebrick") >> sns_alerts
+    cw >> Edge(label="Subscription\nFilters", color="teal", style="bold") >> firehose
+    firehose >> Edge(label="HEC", color="teal", style="bold") >> splunk

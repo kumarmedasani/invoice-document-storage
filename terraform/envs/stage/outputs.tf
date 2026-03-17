@@ -57,3 +57,13 @@ output "landing_bucket_name" {
   description = "Landing zone S3 bucket name"
   value       = module.transfer_family.landing_bucket_name
 }
+
+output "file_notification_sns_topic_arn" {
+  description = "SNS topic ARN for file drop notifications (external systems subscribe here)"
+  value       = module.monitoring.file_notification_sns_topic_arn
+}
+
+output "firehose_delivery_stream_name" {
+  description = "Kinesis Firehose delivery stream name for Splunk"
+  value       = module.monitoring.firehose_delivery_stream_name
+}

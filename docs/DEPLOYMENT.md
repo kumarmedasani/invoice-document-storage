@@ -44,7 +44,8 @@ The deploying principal (user or CI/CD role) requires the following permissions.
 | IAM | `iam:*` | Role and policy management |
 | SNS | `sns:*` | Topic creation, subscriptions |
 | CloudWatch | `cloudwatch:*` | Alarms, dashboards |
-| CloudWatch Logs | `logs:*` | Log group creation, encryption |
+| CloudWatch Logs | `logs:*` | Log group creation, encryption, subscription filters |
+| Firehose | `firehose:*` | Delivery stream creation (Splunk streaming) |
 | Secrets Manager | `secretsmanager:GetSecretValue` | RDS Proxy configuration, credential retrieval |
 | STS | `sts:GetCallerIdentity` | Account ID resolution |
 
@@ -57,6 +58,8 @@ The deploying principal (user or CI/CD role) requires the following permissions.
   - `aws_account_id` — Your 12-digit AWS account ID
   - `alert_email` — Email for CloudWatch alarm notifications
   - `cost_center` — Your organization's cost center identifier
+  - `splunk_hec_endpoint` — Splunk HEC endpoint URL (empty string to skip Splunk)
+  - `splunk_hec_token` — Splunk HEC token per environment (routes to env-specific index)
 - [ ] Network connectivity to AWS APIs (or VPN if required)
 
 ## Deployment Order
@@ -290,6 +293,17 @@ aws ec2 describe-vpc-endpoints \
 aws rds describe-db-clusters \
   --db-cluster-identifier invoice-aurora-prod \
   --query 'DBClusters[0].BackupRetentionPeriod'
+
+# Verify Firehose delivery stream (if Splunk enabled)
+aws firehose describe-delivery-stream \
+  --delivery-stream-name "invoice-logs-to-splunk-prod" \
+  --query 'DeliveryStreamDescription.{Status:DeliveryStreamStatus,Destination:Destinations[0].SplunkDestinationDescription.HECEndpoint}' \
+  2>/dev/null || echo "Splunk streaming not configured"
+
+# Verify file notification SNS topic exists
+aws sns get-topic-attributes \
+  --topic-arn $(terraform output -raw file_notification_sns_topic_arn) \
+  --query 'Attributes.TopicArn'
 ```
 
 ## Post-Deployment Tasks
