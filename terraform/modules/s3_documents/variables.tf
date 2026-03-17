@@ -8,11 +8,6 @@ variable "kms_key_arn" {
   type        = string
 }
 
-variable "ingestion_role_arn" {
-  description = "ARN of the IAM role used by the ingestion service"
-  type        = string
-}
-
 variable "enable_object_lock" {
   description = "Enable S3 Object Lock (true for Prod only)"
   type        = bool

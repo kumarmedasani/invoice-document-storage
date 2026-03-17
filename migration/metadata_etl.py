@@ -295,7 +295,12 @@ def transform_collection_row(row, source_system, table_name, env):
 # Load
 # =============================================================================
 def load_invoice_batch(pg_cursor, documents, details):
-    """Insert a batch of invoice documents and details into Aurora."""
+    """Insert a batch of invoice documents and details into Aurora.
+
+    Uses INSERT ... ON CONFLICT ... RETURNING id to safely handle duplicates.
+    If a document already exists, we look up its id so the detail row can
+    still reference it (idempotent re-runs).
+    """
     doc_sql = """
         INSERT INTO invoice_docs.documents (
             id, document_kind, source_system, account_id, received_date,
@@ -307,7 +312,9 @@ def load_invoice_batch(pg_cursor, documents, details):
             %(file_size_bytes)s, %(content_hash_sha256)s, %(status)s,
             %(legacy_source_table)s, %(legacy_source_id)s
         )
-        ON CONFLICT (legacy_source_table, legacy_source_id) DO NOTHING
+        ON CONFLICT (legacy_source_table, legacy_source_id) DO UPDATE
+            SET legacy_source_id = EXCLUDED.legacy_source_id
+        RETURNING id
     """
 
     detail_sql = """
@@ -329,9 +336,11 @@ def load_invoice_batch(pg_cursor, documents, details):
 
     for doc, detail in zip(documents, details):
         pg_cursor.execute(doc_sql, doc)
-        if pg_cursor.rowcount > 0:
-            detail["document_id"] = doc["id"]
-            pg_cursor.execute(detail_sql, detail)
+        row = pg_cursor.fetchone()
+        actual_doc_id = str(row[0]) if row else doc["id"]
+        detail["document_id"] = actual_doc_id
+        pg_cursor.execute(detail_sql, detail)
+        if actual_doc_id == doc["id"]:
             inserted += 1
         else:
             skipped += 1
@@ -340,7 +349,10 @@ def load_invoice_batch(pg_cursor, documents, details):
 
 
 def load_collection_batch(pg_cursor, documents, details):
-    """Insert a batch of collection letter documents and details into Aurora."""
+    """Insert a batch of collection letter documents and details into Aurora.
+
+    Uses INSERT ... ON CONFLICT ... RETURNING id for idempotent re-runs.
+    """
     doc_sql = """
         INSERT INTO invoice_docs.documents (
             id, document_kind, source_system, account_id, received_date,
@@ -352,7 +364,9 @@ def load_collection_batch(pg_cursor, documents, details):
             %(file_size_bytes)s, %(content_hash_sha256)s, %(status)s,
             %(legacy_source_table)s, %(legacy_source_id)s
         )
-        ON CONFLICT (legacy_source_table, legacy_source_id) DO NOTHING
+        ON CONFLICT (legacy_source_table, legacy_source_id) DO UPDATE
+            SET legacy_source_id = EXCLUDED.legacy_source_id
+        RETURNING id
     """
 
     detail_sql = """
@@ -371,9 +385,11 @@ def load_collection_batch(pg_cursor, documents, details):
 
     for doc, detail in zip(documents, details):
         pg_cursor.execute(doc_sql, doc)
-        if pg_cursor.rowcount > 0:
-            detail["document_id"] = doc["id"]
-            pg_cursor.execute(detail_sql, detail)
+        row = pg_cursor.fetchone()
+        actual_doc_id = str(row[0]) if row else doc["id"]
+        detail["document_id"] = actual_doc_id
+        pg_cursor.execute(detail_sql, detail)
+        if actual_doc_id == doc["id"]:
             inserted += 1
         else:
             skipped += 1

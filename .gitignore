@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — it should be committed
+# to ensure reproducible provider versions across the team.
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

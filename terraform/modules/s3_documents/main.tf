@@ -134,6 +134,49 @@ resource "aws_s3_bucket_object_lock_configuration" "documents" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# S3 Access Logging Bucket
+# -----------------------------------------------------------------------------
+resource "aws_s3_bucket" "access_logs" {
+  bucket = "${local.bucket_name}-access-logs"
+
+  tags = merge(var.tags, {
+    Name = "${local.bucket_name}-access-logs"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    id     = "expire-logs"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+  }
+}
+
+resource "aws_s3_bucket_logging" "documents" {
+  bucket = aws_s3_bucket.documents.id
+
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "s3-access-logs/"
+}
+
+# -----------------------------------------------------------------------------
+# S3 Event Notification
+# -----------------------------------------------------------------------------
 resource "aws_s3_bucket_notification" "documents" {
   count = var.notification_sns_topic_arn != "" ? 1 : 0
 

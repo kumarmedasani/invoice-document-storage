@@ -1,5 +1,11 @@
 # TODO(registry): extract when team size > 5
 
+# DECISION: KMS key policy grants full admin to the root account principal.
+# This delegates KMS permission control to IAM policies (attached to each role),
+# breaking the circular dependency between KMS and IAM modules. Each role's IAM
+# policy explicitly grants kms:GenerateDataKey, kms:Decrypt, kms:DescribeKey on
+# this key's ARN.
+
 resource "aws_kms_key" "main" {
   description             = "Encryption key for invoice document storage - ${var.env}"
   enable_key_rotation     = true
@@ -16,21 +22,6 @@ resource "aws_kms_key" "main" {
           AWS = "arn:aws:iam::${var.aws_account_id}:root"
         }
         Action   = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid    = "ServicePrincipalUsage"
-        Effect = "Allow"
-        Principal = {
-          AWS = var.service_principal_arns
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
         Resource = "*"
       },
       {
