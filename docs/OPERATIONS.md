@@ -16,6 +16,8 @@ This document contains step-by-step operational procedures for the Invoice Docum
 - [10. Viewing CloudWatch Dashboard and Alarms](#10-viewing-cloudwatch-dashboard-and-alarms)
 - [11. Investigating VPC Flow Logs](#11-investigating-vpc-flow-logs)
 - [12. S3 Object Lock Operations](#12-s3-object-lock-operations)
+- [13. Troubleshooting: SFTP Connectivity](#13-troubleshooting-sftp-connectivity)
+- [14. Troubleshooting: Landing Zone Processing](#14-troubleshooting-landing-zone-processing)
 
 ## Common Setup: Retrieve Aurora Credentials
 
@@ -677,3 +679,142 @@ aws s3api delete-object \
 ```
 
 **Warning:** This should only be done in emergency situations with documented approval. All Object Lock bypass actions are logged in the S3 access logs bucket.
+
+---
+
+## 13. Troubleshooting: SFTP Connectivity
+
+**When to use:** Vendors report they cannot connect to the SFTP server or upload files.
+
+### Diagnostic Steps
+
+1. **Check Transfer Family server status:**
+
+```bash
+# Get server ID from Terraform output
+cd terraform/envs/$ENV
+SERVER_ID=$(terraform output -raw sftp_server_id 2>/dev/null || \
+  aws transfer list-servers \
+    --query "Servers[?Tags[?Key=='Name' && contains(Value, '$ENV')]].ServerId" \
+    --output text)
+
+aws transfer describe-server --server-id "$SERVER_ID" \
+  --query '{State: State, Endpoint: EndpointDetails, Protocol: Protocols}'
+```
+
+Expected state: `ONLINE`. If `OFFLINE` or `START_FAILED`, check CloudWatch logs.
+
+2. **Verify SFTP user exists:**
+
+```bash
+aws transfer list-users --server-id "$SERVER_ID" \
+  --query 'Users[*].{UserName: UserName, Role: Role}'
+```
+
+3. **Check SFTP logging role:**
+
+```bash
+aws transfer describe-server --server-id "$SERVER_ID" \
+  --query 'Server.LoggingRole'
+```
+
+If empty, the server cannot write logs. Verify the IAM role exists.
+
+4. **Check landing bucket permissions:**
+
+```bash
+# Verify the SFTP user role can write to the landing bucket
+SFTP_ROLE_ARN=$(aws transfer list-users --server-id "$SERVER_ID" \
+  --query 'Users[0].Role' --output text)
+
+aws iam simulate-principal-policy \
+  --policy-source-arn "$SFTP_ROLE_ARN" \
+  --action-names s3:PutObject \
+  --resource-arns "arn:aws:s3:::invoice-landing-$ENV/*"
+```
+
+5. **Check Transfer Family structured logs:**
+
+```bash
+aws logs filter-log-events \
+  --log-group-name "/invoice/application/$ENV" \
+  --filter-pattern '"transfer.amazonaws.com"' \
+  --start-time $(date -d '1 hour ago' +%s000) \
+  --query 'events[*].message' --output text
+```
+
+### Common Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Connection refused | Server is OFFLINE | `aws transfer start-server --server-id $SERVER_ID` |
+| Authentication failed | No SFTP user configured | Create user with `aws transfer create-user` |
+| Upload fails with 403 | SFTP user role missing S3 permissions | Check IAM role policy |
+| Upload succeeds but Lambda not triggered | SNS notification not configured on landing bucket | Verify S3 event notification configuration |
+
+---
+
+## 14. Troubleshooting: Landing Zone Processing
+
+**When to use:** Files are uploaded to the landing zone but not appearing in the documents bucket, or Lambda is not processing them.
+
+### Diagnostic Steps
+
+1. **Check landing bucket for unprocessed files:**
+
+```bash
+aws s3 ls "s3://invoice-landing-$ENV/" --recursive --human-readable
+```
+
+Files older than a few minutes indicate processing failures.
+
+2. **Check S3 event notification configuration:**
+
+```bash
+aws s3api get-bucket-notification-configuration \
+  --bucket "invoice-landing-$ENV" \
+  --query '{SNS: TopicConfigurations}'
+```
+
+Should show an `s3:ObjectCreated:*` event targeting the SNS topic.
+
+3. **Check SNS topic subscriptions:**
+
+```bash
+SNS_TOPIC_ARN=$(terraform output -raw sns_topic_arn)
+aws sns list-subscriptions-by-topic --topic-arn "$SNS_TOPIC_ARN" \
+  --query 'Subscriptions[*].{Protocol: Protocol, Endpoint: Endpoint, Status: SubscriptionArn}'
+```
+
+4. **Check Lambda invocation errors:**
+
+```bash
+# Check for Lambda errors in CloudWatch Logs
+aws logs filter-log-events \
+  --log-group-name "/invoice/application/$ENV" \
+  --filter-pattern '{ $.level = "ERROR" }' \
+  --start-time $(date -d '1 hour ago' +%s000) \
+  --query 'events[*].message' --output text
+```
+
+5. **Check Lambda function metrics:**
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/Lambda \
+  --metric-name Errors \
+  --dimensions "Name=FunctionName,Value=invoice-ingestion-$ENV" \
+  --start-time "$(date -d '1 hour ago' -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --period 300 --statistics Sum
+```
+
+### Common Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Files stuck in landing bucket | Lambda not triggered | Check SNS topic and S3 event notification |
+| Lambda timeout | ZIP file too large for Lambda /tmp | Increase Lambda memory/timeout or split ZIP |
+| Lambda AccessDenied on landing bucket | Missing `s3:GetObject` or `s3:DeleteObject` on landing bucket | Check Lambda IAM policy |
+| Lambda AccessDenied on documents bucket | Missing `s3:PutObject` on documents bucket | Check Lambda IAM policy |
+| Duplicate processing | S3 event delivered twice (at-least-once) | Implement idempotency via `s3_key` unique constraint in Aurora |

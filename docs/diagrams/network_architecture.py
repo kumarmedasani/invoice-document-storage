@@ -2,8 +2,8 @@
 Invoice Document Storage - AWS Network Architecture Diagram
 Generates a PNG diagram using official AWS icons via the 'diagrams' library.
 
-Layout: LR linear flow. No circular edges to avoid Graphviz routing issues.
-  External → SFTP → S3 → Lambda → Aurora
+Layout: LR linear flow. Two-bucket design (landing zone + documents).
+  External → SFTP → Landing Bucket → Lambda → Documents Bucket + Aurora
 """
 
 from diagrams import Diagram, Cluster, Edge
@@ -44,8 +44,12 @@ with Diagram(
         # ── Ingestion entry point ────────────────────────────────
         sftp = TransferForSftp("Transfer Family\n(SFTP)")
 
-        # ── S3 layer ─────────────────────────────────────────────
-        with Cluster("S3 Storage  (SSE-KMS)"):
+        # ── Landing Zone ─────────────────────────────────────────
+        with Cluster("Landing Zone  (SSE-KMS, 7-day expiry)"):
+            s3_landing = S3("invoice-landing-{env}")
+
+        # ── Documents Bucket ─────────────────────────────────────
+        with Cluster("Document Storage  (SSE-KMS, 10-year lifecycle)"):
             s3_docs = S3("invoice-docs-{env}")
             s3_logs = S3("Access Logs")
 
@@ -74,11 +78,18 @@ with Diagram(
     #  Edges — left-to-right main flow, no circular routes
     # ════════════════════════════════════════════════════════════
 
-    # Main data flow (bold green/orange → purple)
+    # Vendor → SFTP → Landing Zone
     vendors >> Edge(label="SFTP", color="darkgreen", style="bold") >> sftp
     on_prem >> Edge(label="DataSync", color="orange", style="bold") >> sftp
-    sftp >> Edge(label="vendor-uploads/", color="darkorange", style="bold") >> s3_docs
-    s3_docs >> Edge(label="S3 Event → SNS\n→ Lambda", color="darkgreen", style="bold") >> app_lambda
+    sftp >> Edge(label="ZIP / PDF", color="darkorange", style="bold") >> s3_landing
+
+    # Landing Zone → Lambda (S3 event trigger)
+    s3_landing >> Edge(label="S3 Event → SNS\n→ Lambda", color="darkgreen", style="bold") >> app_lambda
+
+    # Lambda → Documents Bucket (extracted files)
+    app_lambda >> Edge(label="Extracted\nfiles", color="darkorange", style="bold") >> s3_docs
+
+    # Lambda → Aurora via RDS Proxy
     app_lambda >> Edge(label="5432/TLS", color="purple", style="bold") >> rds_proxy
     rds_proxy >> Edge(color="purple") >> aurora_w
     aurora_w >> Edge(label="Replication", color="gray", style="dashed") >> aurora_r

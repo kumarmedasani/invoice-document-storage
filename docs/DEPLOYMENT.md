@@ -37,7 +37,8 @@ The deploying principal (user or CI/CD role) requires the following permissions.
 |---|---|---|
 | S3 | `s3:*` | `invoice-tfstate-*`, `invoice-docs-*` |
 | DynamoDB | `dynamodb:*` | `invoice-tfstate-lock` |
-| EC2 | `ec2:*` | VPC, subnets, security groups, endpoints, NAT gateways, EIPs, flow logs |
+| EC2 | `ec2:*` | VPC, subnets, security groups, endpoints, flow logs |
+| Transfer Family | `transfer:*` | SFTP server, users, IAM roles |
 | KMS | `kms:*` | Key creation, alias management, policy updates |
 | RDS | `rds:*` | Aurora cluster, instances, parameter groups, proxy |
 | IAM | `iam:*` | Role and policy management |
@@ -251,7 +252,7 @@ Before applying to production, verify the plan output shows:
 - [ ] No changes to S3 bucket settings that could affect Object Lock
 - [ ] Security group changes do not break existing connectivity
 - [ ] Aurora changes do not trigger an engine restart or failover
-- [ ] NAT Gateway changes maintain HA (3 gateways, one per AZ)
+- [ ] VPC endpoint changes do not disrupt service connectivity
 
 ```bash
 # Apply only after thorough review
@@ -272,10 +273,18 @@ aws ec2 describe-subnets \
 aws s3api get-object-lock-configuration \
   --bucket invoice-docs-prod
 
-# Verify 3 NAT Gateways
-aws ec2 describe-nat-gateways \
-  --filter "Name=tag:Name,Values=invoice-nat-prod-*" \
-  --query 'NatGateways[*].{State:State,AZ:SubnetId}'
+# Verify SFTP server is running
+aws transfer describe-server \
+  --server-id $(terraform output -raw sftp_server_id) \
+  --query '{State:State,Endpoint:EndpointDetails}'
+
+# Verify landing zone bucket exists
+aws s3api head-bucket --bucket invoice-landing-prod
+
+# Verify VPC endpoints (6 total: S3 Gateway + 5 Interface)
+aws ec2 describe-vpc-endpoints \
+  --filters "Name=tag:Name,Values=invoice-*-endpoint-prod" \
+  --query 'VpcEndpoints[*].{Name:Tags[?Key==`Name`].Value|[0],State:State,Type:VpcEndpointType}'
 
 # Verify backup retention is 35 days
 aws rds describe-db-clusters \

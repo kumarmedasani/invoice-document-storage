@@ -24,7 +24,8 @@ This project provides a complete infrastructure-as-code (Terraform) solution for
 - **Amazon S3** for document (PDF) storage with lifecycle tiering (Standard -> Glacier -> Deep Archive) and optional Object Lock for compliance
 - **Aurora PostgreSQL 16** for metadata storage with partitioned tables, managed credentials, and optional RDS Proxy
 - **AWS KMS** for encryption at rest across all services (S3, Aurora, Secrets Manager, CloudWatch Logs)
-- **VPC** with private-only subnets, VPC endpoints (S3 Gateway, Secrets Manager, KMS, CloudWatch), and VPC Flow Logs
+- **AWS Transfer Family (SFTP)** for vendor file ingestion into a landing zone S3 bucket, with Lambda processing (ZIP extraction) into the documents bucket
+- **VPC** with private-only subnets, VPC endpoints (S3 Gateway, Secrets Manager, KMS, CloudWatch, STS), no internet egress, and VPC Flow Logs
 - **CloudWatch** for monitoring with 6 metric alarms, a unified dashboard, and KMS-encrypted log groups
 - **SNS** for alerting on infrastructure events and S3 object creation notifications
 
@@ -101,7 +102,7 @@ invoice-document-storage/
 │   ├── COST_TRACKING.md                # Cost estimates, budgets, optimization
 │   ├── DATABASE.md                     # Schema details, partitioning, roles
 │   ├── DEPLOYMENT.md                   # Step-by-step deployment guide
-│   ├── OPERATIONS.md                   # 8 operational runbooks
+│   ├── OPERATIONS.md                   # 14 operational runbooks
 │   └── SECURITY.md                     # Security controls and compliance
 ├── migration/
 │   ├── CUTOVER_CHECKLIST.md            # Migration cutover procedure
@@ -121,7 +122,8 @@ invoice-document-storage/
 │   │   ├── kms/                       # KMS key, alias, and policy
 │   │   ├── monitoring/                # CloudWatch, SNS, dashboard
 │   │   ├── networking/                # VPC, subnets, endpoints, security groups
-│   │   └── s3_documents/              # S3 bucket, lifecycle, Object Lock
+│   │   ├── s3_documents/              # S3 bucket, lifecycle, Object Lock
+│   │   └── transfer_family/           # SFTP server, landing zone bucket
 │   └── shared/
 │       └── state-backend/             # S3 + DynamoDB for Terraform state
 ├── .gitignore
@@ -134,7 +136,7 @@ invoice-document-storage/
 |---|---|---|---|
 | VPC CIDR | 10.10.0.0/16 | 10.20.0.0/16 | 10.30.0.0/16 |
 | Availability Zones | 2 | 2 | 3 |
-| NAT Gateways | 0 | 1 (shared) | 3 (one per AZ) |
+| Internet Egress | None (VPC endpoints only) | None (VPC endpoints only) | None (VPC endpoints only) |
 | Aurora Instance | db.t4g.medium x1 | db.t4g.large x2 | db.r8g.large x2 |
 | Aurora Backup Retention | 7 days | 14 days | 35 days |
 | RDS Proxy | No | Yes | Yes |
@@ -147,23 +149,24 @@ invoice-document-storage/
 
 ## Terraform Modules
 
-The infrastructure is split into 6 modules with a clear dependency chain:
+The infrastructure is split into 7 modules with a clear dependency chain:
 
 ```
 networking ──┐
              ├──> aurora_postgres ──┐
-kms ─────────┤                     ├──> monitoring ──> s3_documents ──> iam
-             └─────────────────────┘
+kms ─────────┤                     ├──> monitoring ──┬──> s3_documents ──┐
+             └─────────────────────┘                 └──> transfer_family ──> iam
 ```
 
 | Module | Resources Created | Key Outputs |
 |---|---|---|
-| `networking` | VPC, app/data subnets, NAT gateways, IGW, S3 Gateway Endpoint, 4 Interface Endpoints (Secrets Manager, KMS, CloudWatch, Logs), 3 security groups, VPC Flow Logs | `vpc_id`, `app_subnet_ids`, `data_subnet_ids`, `sg_app_id`, `sg_aurora_id` |
+| `networking` | VPC, app/data subnets, S3 Gateway Endpoint, 5 Interface Endpoints (Secrets Manager, KMS, CloudWatch, Logs, STS), 3 security groups, VPC Flow Logs | `vpc_id`, `app_subnet_ids`, `data_subnet_ids`, `sg_app_id`, `sg_aurora_id` |
 | `kms` | KMS symmetric key (rotation enabled), alias `alias/invoice-{env}`, key policy with root admin, Aurora grant, CloudWatch Logs, and non-root deletion deny | `key_arn`, `key_id` |
 | `aurora_postgres` | Aurora PostgreSQL 16.2 cluster, N instances, DB subnet group, parameter group (force SSL, logging), Enhanced Monitoring role, optional RDS Proxy with IAM role | `cluster_id`, `writer_endpoint`, `reader_endpoint`, `master_secret_arn` |
 | `monitoring` | 3 CloudWatch log groups (app, aurora, migration), SNS topic + email subscription, 6 CloudWatch alarms, CloudWatch dashboard (6 widgets) | `sns_topic_arn`, log group names, `dashboard_name` |
 | `s3_documents` | S3 bucket with versioning, SSE-KMS (bucket key), public access block, HTTPS-only policy, lifecycle rules (Standard->Glacier->Deep Archive->Expire), Object Lock (conditional), access logging bucket, SNS notification (conditional) | `bucket_id`, `bucket_arn` |
-| `iam` | Lambda ingestion role, ECS ingestion role, shared ingestion policy (S3, KMS, Secrets Manager, CloudWatch Logs), migration role (DataSync + manual assume) | `lambda_role_arn`, `ecs_role_arn`, `migration_role_arn` |
+| `transfer_family` | AWS Transfer Family SFTP server, landing zone S3 bucket (`invoice-landing-{env}`) with SSE-KMS, 7-day expiry, S3 event notification → SNS, SFTP user/logging IAM roles | `sftp_server_endpoint`, `landing_bucket_arn`, `landing_bucket_name` |
+| `iam` | Lambda ingestion role (cross-bucket: read+delete landing, read+write documents), migration role (DataSync + manual assume) | `lambda_role_arn`, `migration_role_arn` |
 
 ## S3 Key Convention
 
@@ -261,7 +264,7 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment procedures.
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System topology, data flow diagrams, storage lifecycle, security boundaries |
 | [DATABASE.md](docs/DATABASE.md) | Schema design, partitioning strategy, roles, triggers, migration helpers |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Step-by-step deployment guide, rollback procedures, promotion checklist |
-| [OPERATIONS.md](docs/OPERATIONS.md) | 8 operational runbooks for day-to-day tasks and troubleshooting |
+| [OPERATIONS.md](docs/OPERATIONS.md) | 14 operational runbooks for day-to-day tasks, SFTP, and troubleshooting |
 | [COST_TRACKING.md](docs/COST_TRACKING.md) | Cost estimates, AWS Budgets setup, anomaly detection, optimization tips |
 | [SECURITY.md](docs/SECURITY.md) | Security controls, encryption, network isolation, IAM, compliance |
 | [DataSync Setup](migration/datasync-setup.md) | File migration from Windows file share to S3 via AWS DataSync |

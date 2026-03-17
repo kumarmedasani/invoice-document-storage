@@ -24,26 +24,28 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | S3 Standard (1 TB) | ~$8 | ~$23 | ~$23 | $0.023/GB-month |
 | S3 Glacier (10 TB) | - | - | ~$40 | $0.004/GB-month |
 | S3 Deep Archive (50 TB) | - | - | ~$50 | $0.00099/GB-month |
+| S3 Landing Zone Bucket | < $1 | < $1 | < $1 | Transient files, 7-day expiry |
 | S3 Access Logging Bucket | ~$1 | ~$1 | ~$2 | Minimal storage, 90-day expiry |
 | KMS | ~$1 | ~$1 | ~$1 | $1/key/month + API calls |
 | CloudWatch Logs | ~$3 | ~$5 | ~$10 | Ingestion + storage |
 | CloudWatch Alarms | ~$1 | ~$1 | ~$1 | $0.10/alarm/month |
 | CloudWatch Dashboard | ~$3 | ~$3 | ~$3 | $3/dashboard/month |
-| VPC Endpoints (4 Interface) | ~$15 | ~$15 | ~$22 | $0.01/hour/AZ + data |
-| NAT Gateway | - | ~$35 | ~$70 | $0.045/hour + $0.045/GB |
+| VPC Endpoints (5 Interface) | ~$19 | ~$19 | ~$28 | $0.01/hour/AZ + data |
+| AWS Transfer Family (SFTP) | ~$22 | ~$22 | ~$22 | $0.30/hour for SFTP server |
 | VPC Flow Logs | ~$2 | ~$2 | ~$5 | CloudWatch Logs ingestion |
 | SNS | < $1 | < $1 | < $1 | Negligible for alarm emails |
 | Data Transfer | ~$2 | ~$5 | ~$10 | Within-AZ mostly free |
-| **Monthly Total** | **~$100** | **~$300** | **~$630** | |
-| **Annual Total** | **~$1,200** | **~$3,600** | **~$7,560** | |
+| **Monthly Total** | **~$128** | **~$290** | **~$588** | |
+| **Annual Total** | **~$1,536** | **~$3,480** | **~$7,056** | |
 
 ### Cost Notes
 
-- **QA has no NAT Gateway** — saves ~$35/month but has no internet egress from app subnets
+- **No NAT Gateway** — All environments use VPC endpoints instead of NAT Gateways, eliminating ~$35-96/month in NAT costs
+- **AWS Transfer Family** costs $0.30/hour (~$219/month) for the SFTP server plus $0.04/GB for data uploaded
+- **S3 landing zone** costs are negligible — files are transient (7-day expiry) and deleted by Lambda after processing
 - **S3 costs scale with data volume** — the Glacier and Deep Archive estimates assume steady-state after migration
 - **KMS bucket keys** reduce KMS API costs by ~99% — S3 uses a bucket-level key instead of per-object KMS calls
-- **VPC endpoint costs increase with AZ count** — Prod has 3 AZs vs. 2 for QA/Stage ($7.50/endpoint/AZ/month)
-- **NAT Gateway data processing** ($0.045/GB) can spike if S3 traffic bypasses the VPC Gateway Endpoint
+- **VPC endpoint costs increase with AZ count** — Prod has 3 AZs vs. 2 for QA/Stage ($7.50/endpoint/AZ/month). 5 interface endpoints: Secrets Manager, KMS, CloudWatch Monitoring, CloudWatch Logs, STS
 
 ## Cost Breakdown by Service
 
@@ -71,9 +73,18 @@ All estimates are based on us-east-1 pricing as of 2024. Validate against the [A
 | Type | Cost | Count per Env |
 |---|---|---|
 | S3 Gateway | **Free** | 1 |
-| Interface (per AZ) | $0.01/hour = ~$7.50/month | 4 services x N AZs |
+| Interface (per AZ) | $0.01/hour = ~$7.50/month | 5 services x N AZs |
 
-QA: 4 x 2 AZs = 8 endpoints = ~$60/mo... **However**, interface endpoints are shared across services in the same AZ, so the actual cost is lower. The VPC endpoint hourly rate applies per endpoint-per-AZ.
+5 interface endpoints: Secrets Manager, KMS, CloudWatch Monitoring, CloudWatch Logs, STS. The VPC endpoint hourly rate applies per endpoint-per-AZ.
+
+### AWS Transfer Family (SFTP)
+
+| Component | Cost |
+|---|---|
+| SFTP server (per hour) | $0.30/hour (~$219/month) |
+| Data upload (per GB) | $0.04/GB |
+
+The SFTP server runs 24/7. Data upload costs depend on vendor volume — at 100 GB/month, transfer costs are ~$4/month.
 
 ## AWS Cost Explorer Setup
 
@@ -291,11 +302,9 @@ aws s3api get-bucket-encryption \
 
 Without bucket keys, every S3 PutObject/GetObject would call KMS, at $0.03 per 10,000 requests. With bucket keys, S3 generates per-object keys locally.
 
-### 4. NAT Gateway Data Processing
+### 4. Verify VPC Endpoint Routing
 
-NAT Gateway charges **$0.045/GB** for data processed — this can become the largest cost driver if misconfigured.
-
-**Verify S3 traffic uses the VPC Gateway Endpoint (free) and NOT the NAT Gateway:**
+Ensure S3 traffic uses the VPC Gateway Endpoint (free) rather than any other path:
 
 ```bash
 # Check route tables have S3 endpoint route
@@ -305,20 +314,6 @@ aws ec2 describe-route-tables \
 ```
 
 Every route table (app and data tiers) should show an S3 prefix list route pointing to the VPC Gateway Endpoint.
-
-**Monitor NAT Gateway data processing:**
-
-```bash
-# Get NAT Gateway bytes processed in the last 24 hours
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/NATGateway \
-  --metric-name BytesOutToDestination \
-  --dimensions "Name=NatGatewayId,Value=<nat-gw-id>" \
-  --start-time "$(date -d '24 hours ago' -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --period 86400 \
-  --statistics Sum
-```
 
 ### 5. Aurora Right-Sizing
 
